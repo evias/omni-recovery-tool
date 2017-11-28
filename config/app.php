@@ -7,7 +7,7 @@ return [
     /*
      * Here goes the application name.
      */
-    'name' => 'Laravel Zero',
+    'name' => "Greg's Blockchain Tools",
 
     /*
      * Here goes the application version.

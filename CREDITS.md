@@ -2,11 +2,10 @@
 
 ## Main projects used
 
-- [Laravel](https://laravel.com) - Illuminate components
+- [Laravel Zero](https://github.com/laravel-zero/laravel-zero) - Illuminate components
 - [Symfony](https://symfony.com) - Console component
 - [JoliNotif](https://github.com/jolicode/JoliNotif) - Send notifications to your desktop
 
 ## Contributors
-- [Harish Toshniwal](https://github.com/introwit) - Maintainer
-- [Alexandre G. Raymond](https://github.com/ilesinge) - The build command
-- [Caneco](https://github.com/caneco) - Wallpapers and logo
+
+- [Grégory Saive](https://github.com/evias) - Maintainer
