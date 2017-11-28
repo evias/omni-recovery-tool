@@ -112,7 +112,7 @@ class Pay2ScriptHash
      *
      * @return array
      */
-    public function setUp()
+    public function setUp(): array
     {
         $our_opts = [
             'min' => null,

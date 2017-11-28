@@ -10,6 +10,7 @@ The evias/blockchain-cli Package aims to be an easy to use command line interfac
 - php>=7.1 : for laravel-zero/laravel-zero Package
 - php7.1-gmp : for Bit-Wasp/bitcoin-php Package
 - php7.1-bcmath : for Bit-Wasp/bitcoin-php Package
+- php7.1-intl : for UTF-8 encoded passphrases
 - php7.1-xml : for PHPUnit
 - php7.1-mbstring : for PHPUnit
 - php7.1-curl
@@ -18,20 +19,23 @@ The evias/blockchain-cli Package aims to be an easy to use command line interfac
 
 ```bash
 
+# Get list of available commands
+$ php application list
+
 # Get Simple HD Address from BIP32 Extended Public Key
-$ php artisan wallet:hd-from-xpub --xpub="xpub123456"
+$ php application wallet:hd-from-xpub --xpub="xpub123456"
 
 # Get Multisig HD Address from BIP32 Extended Public Keys of cosigners
-$ php artisan wallet:hd-from-xpub --xpubs="xpub123456,xpub1234332,xpub493554" --mincount 2
+$ php application wallet:hd-from-xpub --xpubs="xpub123456,xpub1234332,xpub493554" --mincount 2
 
 # Get BIP39 Seed from Mnemonic as well as BIP32 Root Key :
-$ php artisan wallet:derive --mnemonic="abandon abandon abandon"
+$ php application wallet:derive --mnemonic="abandon abandon abandon"
 
 # Get BIP44 Addresses, Public Keys and Private Keys
-$ php artisan wallet:derive --mnemonic="abandon abandon abandon" --path="m/44'/0'/0'/0"
+$ php application wallet:derive --mnemonic="abandon abandon abandon" --path="m/44'/0'/0'/0"
 
 # Get BIP32 Addresses protected by password (Bitcoin Core) :
-$ php artisan wallet:derive --mnemonic="abandon abandon abandon" --password="mySecurePassword" --path="m/0'/0'"
+$ php application wallet:derive --mnemonic="abandon abandon abandon" --password="mySecurePassword" --path="m/0'/0'"
 ```
 
 ## Pot de vin

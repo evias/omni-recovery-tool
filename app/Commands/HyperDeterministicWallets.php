@@ -15,10 +15,10 @@
  * @license    MIT License
  * @copyright  (c) 2017, Grégory Saive
  */
-namespace App\Console\Commands;
+namespace App\Commands;
 
-use Illuminate\Console\Command;
-use Illuminate\Container\Container;
+use Illuminate\Console\Scheduling\Schedule;
+use LaravelZero\Framework\Commands\Command;
 
 use BitWasp\Bitcoin\Bitcoin;
 use BitWasp\Bitcoin\Key\Deterministic\HierarchicalKeyFactory;
@@ -49,13 +49,6 @@ class HyperDeterministicWallets
     protected $description = 'Utility for creating BIP32 HD Addresses given an input of XPUBs (BIP32 Extended Public Key).';
 
     /**
-     * The IoC Container
-     * 
-     * @var \Illuminate\Container\Container
-     */
-    protected $app;
-
-    /**
      * Raw list of command line arguments
      * 
      * @var array
@@ -70,21 +63,11 @@ class HyperDeterministicWallets
     protected $extendedKeys = [];
 
     /**
-     * Create a new command instance.
-     * @return  void
-     */
-    public function __construct(Container $app)
-    {
-        parent::__construct();
-        $this->app = $app;
-    }
-
-    /**
      * Handle command line arguments
      *
      * @return array
      */
-    public function setUp()
+    public function setUp(): array
     {
         $our_opts = ['xpub' => null, 'xpubs' => null, "network" => "bitcoin", "path" => null, 'mincount' => null];
         $options  = array_intersect_key($this->option(), $our_opts);
@@ -108,7 +91,7 @@ class HyperDeterministicWallets
      *
      * @return mixed
      */
-    public function handle()
+    public function handle(): void
     {
         $this->setUp();
 
@@ -119,7 +102,7 @@ class HyperDeterministicWallets
         }
         catch (Exception $e) {
             $this->error("Invalid Network provided: " . var_export($net, true));
-            return 1;
+            return ;
         }
 
         // Read Derivation Path and interpret
@@ -127,7 +110,7 @@ class HyperDeterministicWallets
         $data = [];
         if (empty($path) || ! (bool) preg_match("/^(m\/)?(([0-9]+[h'\/]*)*)/", $path, $data)) {
             $this->error("Invalid Derivation Path provided: " . var_export($path, true));
-            return 1;
+            return ;
         }
 
         // clean derivation path (with m/ prefix if provided)
@@ -170,7 +153,7 @@ class HyperDeterministicWallets
         }
         else {
             $this->error("Please provide BIP32 Extended Public Keys using --xpub (Simple HD) or --xpubs (Multisig HD).");
-            return 1;
+            return ;
         }
 
         $result = [
@@ -194,7 +177,18 @@ class HyperDeterministicWallets
             $suffix = in_array($field, ["path", "address"]) ? "" : PHP_EOL;
             $this->info("  " . $field . " : " . $prefix . $value . $suffix);
         }
-        return 0;
+        return ;
+    }
+
+    /**
+     * Define the command's schedule.
+     *
+     * @param  \Illuminate\Console\Scheduling\Schedule $schedule
+     *
+     * @return void
+     */
+    public function schedule(Schedule $schedule): void
+    {
     }
 
 }

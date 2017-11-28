@@ -15,10 +15,10 @@
  * @license    MIT License
  * @copyright  (c) 2017, Grégory Saive
  */
-namespace App\Console\Commands;
+namespace App\Commands;
 
-use Illuminate\Console\Command;
-use Illuminate\Container\Container;
+use Illuminate\Console\Scheduling\Schedule;
+use LaravelZero\Framework\Commands\Command;
 
 use BitWasp\Buffertools\Buffer;
 use BitWasp\Bitcoin\Bitcoin;
@@ -57,13 +57,6 @@ class WalletSeedDerivation
     protected $description = 'Utility for different Derivation Paths starting with a BIP39 Mnemonic.';
 
     /**
-     * The IoC Container
-     * 
-     * @var \Illuminate\Container\Container
-     */
-    protected $app;
-
-    /**
      * Raw list of command line arguments
      * 
      * @var array
@@ -78,21 +71,11 @@ class WalletSeedDerivation
     protected $extendedKeys = [];
 
     /**
-     * Create a new command instance.
-     * @return  void
-     */
-    public function __construct(Container $app)
-    {
-        parent::__construct();
-        $this->app = $app;
-    }
-
-    /**
      * Handle command line arguments
      *
      * @return array
      */
-    public function setUp()
+    public function setUp(): array
     {
         $our_opts = ['mnemonic' => null, 'password' => null, 'network' => "bitcoin", "path" => null, "count" => 3];
         $options  = array_intersect_key($this->option(), $our_opts);
@@ -106,7 +89,7 @@ class WalletSeedDerivation
      *
      * @return mixed
      */
-    public function handle()
+    public function handle(): void
     {
         $this->setUp();
 
@@ -117,7 +100,7 @@ class WalletSeedDerivation
         }
         catch (Exception $e) {
             $this->error("Invalid Network provided: " . var_export($net, true));
-            return 1;
+            return ;
         }
 
         $mn = $this->arguments["mnemonic"];
@@ -125,7 +108,7 @@ class WalletSeedDerivation
 
         if (empty($mn)) {
             $this->error("Cannot create a BIP39 Seed without a mnemonic (-m 'your word list').");
-            return 1;
+            return ;
         }
 
         $seed   = new Bip39SeedGenerator();
@@ -146,7 +129,7 @@ class WalletSeedDerivation
         $data = [];
         if (empty($path) || ! (bool) preg_match("/^(m\/)?(([0-9]+[h'\/]*)*)/", $path, $data)) {
             // Invalid derivation path or empty path => no derivation done.
-            return 0;
+            return ;
         }
 
         // BIP32 DERIVATIONS
@@ -175,16 +158,16 @@ class WalletSeedDerivation
             $this->deriveAndPrint($child, $nextPath, $d, $network);
         }
 
-        return 0;
+        return ;
     }
 
-    protected function deriveAndPrint(HierarchicalKey $parent, $path, $index = 0, $network = null)
+    protected function deriveAndPrint(HierarchicalKey $parent, $path, $index = 0, $network = null): mixed
     {
         $key = $parent->deriveChild($index);
         return $this->printKeyData($key, $path, $network, function($msg) { $this->info($msg); });
     }
 
-    protected function printKeyData(HierarchicalKey $key, $path, $network, $logClosure)
+    protected function printKeyData(HierarchicalKey $key, $path, $network, $logClosure): void
     {
         $data = [];
         preg_match("/^(m\/)?(([0-9]+[h'\/]*)*)/", $path, $data);
@@ -216,6 +199,18 @@ class WalletSeedDerivation
 
         $logClosure($type . " " . $absolutePath . " Public Key: " . $key->getPublicKey()->getHex());
         $logClosure($type . " " . $absolutePath . " Address: " . AddressFactory::fromKey($key->getPublicKey())->getAddress($network));
+    }
+
+    /**
+     * Define the command's schedule.
+     *
+     * @param  \Illuminate\Console\Scheduling\Schedule $schedule
+     *
+     * @return void
+     */
+    public function schedule(Schedule $schedule): void
+    {
+        // $schedule->command(static::class)->everyMinute();
     }
 
 }
