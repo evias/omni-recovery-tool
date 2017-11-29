@@ -45,7 +45,7 @@ use BitWasp\Bitcoin\Script\WitnessScript;
 use BitWasp\Bitcoin\Script\P2shScript;
 use BitWasp\Bitcoin\Script\Opcodes;
 
-class Pay2ScriptHash
+class ColoredPay2ScriptHash
     extends Command
 {
     /**
@@ -53,14 +53,17 @@ class Pay2ScriptHash
      *
      * @var string
      */
-    protected $signature = 'wallet:p2sh
+    protected $signature = 'wallet:p2sh-colored
                             {--m|min=1 : Define number of Minimum Cosignatories for the Multisig P2SH.}
                             {--K|keys= : Define a comma-separated list of Private Keys WIFs.}
                             {--t|to= : Define a destination Address.}
-                            {--O|transaction= : Define a Transaction Hash that will be used as the Transaction Input.}
+                            {--O|transaction= : Define a Transaction Hash that will be used as the Transaction Output.}
+                            {--F|fee-input= : Define a Fee Input Transaction Hash (From where to pay fees).}
                             {--f|fee= : Define a Fee for the transaction in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--A|amount= : Define the transaction amount without fee in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--R|raw-amount= : Define the transaction RAW amount without fee in Satoshi (0.00000001 BTC = 1 Sat).}
+                            {--C|currency= : Define a custom currency for the Amount.}
+                            {--c|colored-op= : Define a colored Operation (hexadecimal).}
                             {--N|network=bitcoin : Define which Network must be used ("bitcoin" for Bitcoin Livenet).}';
 
     /**
@@ -68,35 +71,41 @@ class Pay2ScriptHash
      *
      * @var string
      */
-    protected $description = 'Utility for creating Multisig Pay to Script Hash transactions.';
+    protected $description = 'Utility for creating Colored Coins Multisig Pay to Script Hash transactions.';
 
     /**
      * The IoC Container
-     *
+     * 
      * @var \Illuminate\Container\Container
      */
     protected $app;
 
     /**
      * Raw list of command line arguments
-     *
+     * 
      * @var array
      */
     protected $arguments = [];
 
     /**
-     * List of Public Keys
-     *
+     * List of XPUB input
+     * 
      * @var array
      */
-    protected $publicKeys = [];
+    protected $extendedKeys = [];
 
     /**
-     * List of Private Keys by their Public Key
+     * Array of Smart Properties for Colored Coins
      *
      * @var array
      */
-    protected $privateByPub = [];
+    protected $currencyProps = [
+        "USDT" => [
+            "currencyId" => 31,
+            "currency_str" => "Smart Property",
+            "divisibility" => 8,
+        ],
+    ];
 
     /**
      * Handle command line arguments
@@ -113,29 +122,14 @@ class Pay2ScriptHash
             "transaction" => null,
             "fee" => null,
             "amount" => null,
+            "currency" => "USDT",
             "raw-amount" => null,
+            "colored-op" => null,
+            "fee-input" => null,
         ];
 
         // parse command line arguments.
         $options  = array_intersect_key($this->option(), $our_opts);
-
-        // Parse WIF (Wallet Import Format) Private Keys
-        $wifs = explode(",", $options["keys"]);
-        $privKeys = [];
-        $publicKeys = [];
-        $privByPub = [];
-        foreach ($wifs as $wif) {
-
-            $priv = PrivateKeyFactory::fromWif($wif);
-            array_push($privKeys, $priv);
-            array_push($publicKeys, $priv->getPublicKey());
-
-            $privByPub[$priv->getPubKeyHash()->getHex()] = $priv;
-        }
-
-        // Sort public keys
-        $this->publicKeys = Buffertools::sort($publicKeys);
-        $this->privateByPub = $privByPub;
 
         // store arguments
         $this->arguments = $options;
@@ -161,8 +155,10 @@ class Pay2ScriptHash
             return ;
         }
 
+        $cur  = strtoupper($this->arguments["currency"] ?: "USDT");
         $min  = (int) $this->arguments["min"] ?: 1;
         $txid = $this->arguments["transaction"];
+        $txfee= $this->arguments["fee-input"];
         $dest = $this->arguments["to"];
         $keys = $this->arguments["keys"] ?: "";
         $wifs = explode(",", $keys);
@@ -182,18 +178,46 @@ class Pay2ScriptHash
             return ;
         }
 
+        if (! array_key_exists($cur, $this->currencyProps)) {
+            $this->error("Provided currency '" . $cur . "' is not present in `currencyProps`.");
+            return ;
+        }
+
         $this->info("Now preparing transaction..");
+
+        $props = $this->currencyProps[$cur];
 
         // address for `destination` (--to)
         $address = AddressFactory::fromString($dest, $network);
 
+        // Parse WIF (Wallet Import Format) Private Keys
+        $privKeys = [];
+        $publicKeys = [];
+        $privByPub = [];
+        foreach ($wifs as $wif) {
+
+            $priv = PrivateKeyFactory::fromWif($wif);
+            array_push($privKeys, $priv);
+            array_push($publicKeys, $priv->getPublicKey());
+
+            $privByPub[$priv->getPubKeyHash()->getHex()] = $priv;
+        }
+
+        // Sort public keys
+        //$publicKeys = Buffertools::sort($publicKeys);
+
         // Create Outpoint from --transaction hash.
         $outpoint = new Outpoint(Buffer::hex($txid), 1);
+        $outpointFee = new Outpoint(Buffer::hex($txfee), 0);
 
         // Script is P2SH | P2WSH | P2PKH
-        $redeemScript   = ScriptFactory::scriptPubKey()->multisig($min, $publicKeys, true); //sort=true
+        $redeemScript   = ScriptFactory::scriptPubKey()->multisig($min, $publicKeys, true);
         $p2shScript     = new P2shScript($redeemScript);
         $outputScript   = $p2shScript->getOutputScript();
+
+        //$colorRedeem    = ScriptFactory::scriptPubKey()->multisig($min, $publicKeys, false);
+        //$colorP2SH      = new P2shScript($colorRedeem);
+        //$colorOutput    = $colorP2SH->getOutputScript();
 
         // Define coloring operation
         $colorOperation = $this->arguments["colored-op"] ?: "6f6d6e69000000000000001f000000002faf0800";
@@ -202,21 +226,23 @@ class Pay2ScriptHash
 
         // prepare transaction fee and amount
         $fee    = (int) $this->arguments["fee"] ?: 100030; // 0.001.. BTC
-        $amount = (int) $this->arguments["raw-amount"] ?: ($this->arguments["amount"] ?: 8) * pow(10, 8); // 8 USDT
+        $amount = (int) $this->arguments["raw-amount"] ?: ($this->arguments["amount"] ?: 8) * pow(10, $props["divisibility"]); // 8 USDT
 
         // create new transaction output
         //$total  = $amount + $fee;
-        $txOut  = new TransactionOutput($amount, $outputScript);
+        $txOut  = new TransactionOutput($fee, $outputScript);
+        $txOutCol = new TransactionOutput(0, $outputScript);
 
         // bundle it together..
         $transaction = TransactionFactory::build()
                             ->spendOutPoint($outpoint, $outputScript)
-                            ->output($amount + $fee, $outputScript)
+                            ->spendOutPoint($outpointFee, $outputScript/*$colorOutput*/)
+                            ->output(0, $colorScript->getScript())
+                            ->output($fee, $outputScript)
                             ->get();
 
-
         // Sign transaction and display details
-        $signed = $this->signTransaction($transaction, $p2shScript, [$txOut]);
+        $signed = $this->signTransaction($transaction, $p2shScript, [$txOut, $txOutCol]);
 
         // get human-readable inputs and outputs
         list($inputs,
@@ -228,7 +254,7 @@ class Pay2ScriptHash
             "outputs" => $outputs
         ];
 
-        // print details about transaction
+        // print details about transaction.
         $this->info("");
         $this->info("  Transaction Data: " . $signed->getBuffer()->getSize() . " Bytes");
         $this->info("");
@@ -262,6 +288,7 @@ class Pay2ScriptHash
         }
 
         $this->info("");
+
         return ;
     }
 
@@ -292,8 +319,6 @@ class Pay2ScriptHash
      */
     protected function signTransaction(Transaction $transation, Script $script, array $outputs): Transaction
     {
-        $this->info("Now applying Transaction Signatures..");
-
         $ec = \BitWasp\Bitcoin\Bitcoin::getEcAdapter();
 
         // Multisig - sign transaction with `min` cosignatories
@@ -318,6 +343,7 @@ class Pay2ScriptHash
             endfor;
         endfor;
 
+        // process signatures and mutate transaction
         $signed = $signer->get();
         $overall = true;
         foreach ($inputs as $ix => $input) {
