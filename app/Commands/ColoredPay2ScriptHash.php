@@ -33,6 +33,7 @@ use BitWasp\Bitcoin\Key\Deterministic\HierarchicalKeySequence;
 use BitWasp\Bitcoin\Key\Deterministic\MultisigHD;
 use BitWasp\Bitcoin\Network\NetworkFactory;
 use BitWasp\Bitcoin\Key\PublicKeyFactory;
+use BitWasp\Bitcoin\Transaction\Transaction;
 use BitWasp\Bitcoin\Transaction\OutPoint;
 use BitWasp\Bitcoin\Transaction\TransactionOutput;
 use BitWasp\Bitcoin\Transaction\TransactionFactory;
@@ -44,6 +45,7 @@ use BitWasp\Bitcoin\Address\AddressFactory;
 use BitWasp\Bitcoin\Script\WitnessScript;
 use BitWasp\Bitcoin\Script\P2shScript;
 use BitWasp\Bitcoin\Script\Opcodes;
+use BitWasp\Bitcoin\Script\Script;
 
 class ColoredPay2ScriptHash
     extends Command
@@ -57,8 +59,10 @@ class ColoredPay2ScriptHash
                             {--m|min=1 : Define number of Minimum Cosignatories for the Multisig P2SH.}
                             {--K|keys= : Define a comma-separated list of Private Keys WIFs.}
                             {--t|to= : Define a destination Address.}
-                            {--O|transaction= : Define a Transaction Hash that will be used as the Transaction Output.}
-                            {--F|fee-input= : Define a Fee Input Transaction Hash (From where to pay fees).}
+                            {--O|colored-tx= : Define a Transaction Hash that will be used as the Transaction Output.}
+                            {--I|colored-ix=0 : Define a Transaction Input index (Usually named "vout").}
+                            {--F|btc-input-tx= : Define a Fee Input Transaction Hash (From where to pay fees).}
+                            {--i|btc-input-ix= : Define a Fee Input Transaction index.}
                             {--f|fee= : Define a Fee for the transaction in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--A|amount= : Define the transaction amount without fee in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--R|raw-amount= : Define the transaction RAW amount without fee in Satoshi (0.00000001 BTC = 1 Sat).}
@@ -88,11 +92,18 @@ class ColoredPay2ScriptHash
     protected $arguments = [];
 
     /**
-     * List of XPUB input
-     * 
+     * List of Public Keys
+     *
      * @var array
      */
-    protected $extendedKeys = [];
+    protected $publicKeys = [];
+
+    /**
+     * List of Private Keys by their Public Key
+     *
+     * @var array
+     */
+    protected $privateByPub = [];
 
     /**
      * Array of Smart Properties for Colored Coins
@@ -119,17 +130,37 @@ class ColoredPay2ScriptHash
             'network' => "bitcoin",
             "keys" => null,
             "to" => null,
-            "transaction" => null,
+            "colored-tx" => null,
+            "colored-ix" => 0,
             "fee" => null,
             "amount" => null,
             "currency" => "USDT",
             "raw-amount" => null,
             "colored-op" => null,
-            "fee-input" => null,
+            "btc-input-tx" => null,
+            "btc-input-ix" => 0,
         ];
 
         // parse command line arguments.
         $options  = array_intersect_key($this->option(), $our_opts);
+
+        // Parse WIF (Wallet Import Format) Private Keys
+        $wifs = explode(",", $options["keys"]);
+        $privKeys = [];
+        $publicKeys = [];
+        $privByPub = [];
+        foreach ($wifs as $wif) {
+
+            $priv = PrivateKeyFactory::fromWif($wif);
+            array_push($privKeys, $priv);
+            array_push($publicKeys, $priv->getPublicKey());
+
+            $privByPub[$priv->getPubKeyHash()->getHex()] = $priv;
+        }
+
+        // Sort public keys
+        $this->publicKeys = Buffertools::sort($publicKeys);
+        $this->privateByPub = $privByPub;
 
         // store arguments
         $this->arguments = $options;
@@ -155,67 +186,56 @@ class ColoredPay2ScriptHash
             return ;
         }
 
-        $cur  = strtoupper($this->arguments["currency"] ?: "USDT");
-        $min  = (int) $this->arguments["min"] ?: 1;
-        $txid = $this->arguments["transaction"];
-        $txfee= $this->arguments["fee-input"];
-        $dest = $this->arguments["to"];
-        $keys = $this->arguments["keys"] ?: "";
-        $wifs = explode(",", $keys);
+        // read parameters..
+        $currencySlug  = strtoupper($this->arguments["currency"] ?: "USDT");
+        $minCosignatories     = (int) $this->arguments["min"] ?: 1;
+        $coloredTransactionId = $this->arguments["colored-tx"];
+        $coloredInputIndex    = $this->arguments["colored-ix"];
+        $btcTransactionId     = $this->arguments["btc-input-tx"];
+        $btcInputIndex        = $this->arguments["btc-input-ix"];
 
+        $destination = $this->arguments["to"];
+        $privateKeys = $this->arguments["keys"] ?: "";
+        $wifs = explode(",", $privateKeys);
+
+        // interpret / validate mandatory parameters
         if (empty($wifs)) {
             $this->error("Please specify a comma-separated list of Private Key WIFs with --keys.");
             return ;
         }
 
-        if (empty($txid)) {
+        if (empty($coloredTransactionId)) {
             $this->error("Please specify a Transaction Hash with --transaction (32 bytes hexadecimal).");
             return ;
         }
 
-        if (empty($dest)) {
+        if (empty($destination)) {
             $this->error("Please specify a destination Address with --dest.");
             return ;
         }
 
-        if (! array_key_exists($cur, $this->currencyProps)) {
-            $this->error("Provided currency '" . $cur . "' is not present in `currencyProps`.");
+        if (! array_key_exists($currencySlug, $this->currencyProps)) {
+            $this->error("Provided currency '" . $currencySlug . "' is not present in `currencyProps`.");
             return ;
         }
 
         $this->info("Now preparing transaction..");
 
-        $props = $this->currencyProps[$cur];
+        $props = $this->currencyProps[$currencySlug];
 
         // address for `destination` (--to)
-        $address = AddressFactory::fromString($dest, $network);
-
-        // Parse WIF (Wallet Import Format) Private Keys
-        $privKeys = [];
-        $publicKeys = [];
-        $privByPub = [];
-        foreach ($wifs as $wif) {
-
-            $priv = PrivateKeyFactory::fromWif($wif);
-            array_push($privKeys, $priv);
-            array_push($publicKeys, $priv->getPublicKey());
-
-            $privByPub[$priv->getPubKeyHash()->getHex()] = $priv;
-        }
-
-        // Sort public keys
-        //$publicKeys = Buffertools::sort($publicKeys);
+        $address = AddressFactory::fromString($destination, $network);
 
         // Create Outpoint from --transaction hash.
-        $outpoint = new Outpoint(Buffer::hex($txid), 1);
-        $outpointFee = new Outpoint(Buffer::hex($txfee), 0);
+        $outpoint = new Outpoint(Buffer::hex($coloredTransactionId), $coloredInputIndex);
+        $outpointFee = new Outpoint(Buffer::hex($btcTransactionId), $btcInputIndex);
 
         // Script is P2SH | P2WSH | P2PKH
-        $redeemScript   = ScriptFactory::scriptPubKey()->multisig($min, $publicKeys, true);
+        $redeemScript   = ScriptFactory::scriptPubKey()->multisig($minCosignatories, $this->publicKeys, true);
         $p2shScript     = new P2shScript($redeemScript);
         $outputScript   = $p2shScript->getOutputScript();
 
-        //$colorRedeem    = ScriptFactory::scriptPubKey()->multisig($min, $publicKeys, false);
+        //$colorRedeem    = ScriptFactory::scriptPubKey()->multisig($minCosignatories, $this->publicKeys, false);
         //$colorP2SH      = new P2shScript($colorRedeem);
         //$colorOutput    = $colorP2SH->getOutputScript();
 
@@ -317,8 +337,11 @@ class ColoredPay2ScriptHash
      * @param   array                                       $outputs    Array of TransactionOutput instances
      * @return  \BitWasp\Bitcoin\Transaction\Transaction
      */
-    protected function signTransaction(Transaction $transation, Script $script, array $outputs): Transaction
+    protected function signTransaction(Transaction $transaction, Script $script, array $outputs): Transaction
     {
+        $this->info("Now applying Transaction Signatures..");
+
+        $minCosignatories = $this->arguments["min"] ?: 1;
         $ec = \BitWasp\Bitcoin\Bitcoin::getEcAdapter();
 
         // Multisig - sign transaction with `min` cosignatories
@@ -327,7 +350,7 @@ class ColoredPay2ScriptHash
                         ->p2sh($script);
 
         $inputs = [];
-        for ($ix = 0; $ix < $min; $ix++) :
+        for ($ix = 0; $ix < $minCosignatories; $ix++) :
 
             // Iterate through SORTED PUBLIC KEYS because this defines
             // the signature order for multisignature transactions!

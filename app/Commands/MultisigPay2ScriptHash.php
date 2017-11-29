@@ -33,6 +33,7 @@ use BitWasp\Bitcoin\Key\Deterministic\HierarchicalKeySequence;
 use BitWasp\Bitcoin\Key\Deterministic\MultisigHD;
 use BitWasp\Bitcoin\Network\NetworkFactory;
 use BitWasp\Bitcoin\Key\PublicKeyFactory;
+use BitWasp\Bitcoin\Transaction\Transaction;
 use BitWasp\Bitcoin\Transaction\OutPoint;
 use BitWasp\Bitcoin\Transaction\TransactionOutput;
 use BitWasp\Bitcoin\Transaction\TransactionFactory;
@@ -44,8 +45,9 @@ use BitWasp\Bitcoin\Address\AddressFactory;
 use BitWasp\Bitcoin\Script\WitnessScript;
 use BitWasp\Bitcoin\Script\P2shScript;
 use BitWasp\Bitcoin\Script\Opcodes;
+use BitWasp\Bitcoin\Script\Script;
 
-class Pay2ScriptHash
+class MultisigPay2ScriptHash
     extends Command
 {
     /**
@@ -53,11 +55,12 @@ class Pay2ScriptHash
      *
      * @var string
      */
-    protected $signature = 'wallet:p2sh
+    protected $signature = 'wallet:p2sh-multisig
                             {--m|min=1 : Define number of Minimum Cosignatories for the Multisig P2SH.}
                             {--K|keys= : Define a comma-separated list of Private Keys WIFs.}
                             {--t|to= : Define a destination Address.}
                             {--O|transaction= : Define a Transaction Hash that will be used as the Transaction Input.}
+                            {--I|input=0 : Define a Transaction Input index (Usually named "vout").}
                             {--f|fee= : Define a Fee for the transaction in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--A|amount= : Define the transaction amount without fee in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--R|raw-amount= : Define the transaction RAW amount without fee in Satoshi (0.00000001 BTC = 1 Sat).}
@@ -114,6 +117,7 @@ class Pay2ScriptHash
             "fee" => null,
             "amount" => null,
             "raw-amount" => null,
+            "index" => 0,
         ];
 
         // parse command line arguments.
@@ -163,6 +167,7 @@ class Pay2ScriptHash
 
         $min  = (int) $this->arguments["min"] ?: 1;
         $txid = $this->arguments["transaction"];
+        $vout = $this->arguments["input"] ?: 0;
         $dest = $this->arguments["to"];
         $keys = $this->arguments["keys"] ?: "";
         $wifs = explode(",", $keys);
@@ -188,17 +193,12 @@ class Pay2ScriptHash
         $address = AddressFactory::fromString($dest, $network);
 
         // Create Outpoint from --transaction hash.
-        $outpoint = new Outpoint(Buffer::hex($txid), 1);
+        $outpoint = new Outpoint(Buffer::hex($txid), $vout);
 
         // Script is P2SH | P2WSH | P2PKH
-        $redeemScript   = ScriptFactory::scriptPubKey()->multisig($min, $publicKeys, true); //sort=true
+        $redeemScript   = ScriptFactory::scriptPubKey()->multisig($min, $this->publicKeys, true); //sort=true
         $p2shScript     = new P2shScript($redeemScript);
         $outputScript   = $p2shScript->getOutputScript();
-
-        // Define coloring operation
-        $colorOperation = $this->arguments["colored-op"] ?: "6f6d6e69000000000000001f000000002faf0800";
-        $colorScript    = ScriptFactory::create()->sequence([
-                            Opcodes::OP_RETURN, Buffer::hex($colorOperation)]);
 
         // prepare transaction fee and amount
         $fee    = (int) $this->arguments["fee"] ?: 100030; // 0.001.. BTC
@@ -294,6 +294,7 @@ class Pay2ScriptHash
     {
         $this->info("Now applying Transaction Signatures..");
 
+        $minCosignatories = $this->arguments["min"] ?: 1;
         $ec = \BitWasp\Bitcoin\Bitcoin::getEcAdapter();
 
         // Multisig - sign transaction with `min` cosignatories
