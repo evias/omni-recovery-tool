@@ -25,6 +25,7 @@ use BitWasp\Buffertools\Buffertools;
 use BitWasp\Bitcoin\Bitcoin;
 use BitWasp\Bitcoin\Amount;
 use BitWasp\Bitcoin\Base58;
+use BitWasp\Bitcoin\Network\Network;
 use BitWasp\Bitcoin\Mnemonic\MnemonicFactory;
 use BitWasp\Bitcoin\Mnemonic\Bip39\Bip39SeedGenerator;
 use BitWasp\Bitcoin\Key\Deterministic\HierarchicalKeyFactory;
@@ -47,6 +48,8 @@ use BitWasp\Bitcoin\Script\P2shScript;
 use BitWasp\Bitcoin\Script\Opcodes;
 use BitWasp\Bitcoin\Script\Script;
 
+use App\Helpers\IntegerConvert;
+
 class ColoredPay2ScriptHash
     extends Command
 {
@@ -57,7 +60,12 @@ class ColoredPay2ScriptHash
      */
     protected $signature = 'wallet:p2sh-colored
                             {--m|min=1 : Define number of Minimum Cosignatories for the Multisig P2SH.}
-                            {--K|keys= : Define a comma-separated list of Private Keys WIFs.}
+                            {--c1|cosig1= : Define a Mnemonic passphrase for cosignator 1.}
+                            {--c1p|cosig1-password= : Define a Password for cosignator 1.}
+                            {--c2|cosig2= : Define a Mnemonic passphrase for cosignator 2.}
+                            {--c2p|cosig2-password= : Define a Password for cosignator 2.}
+                            {--c3|cosig3= : Define a Mnemonic passphrase for cosignator 3.}
+                            {--c3p|cosig3-password= : Define a Password for cosignator 3.}
                             {--t|to= : Define a destination Address.}
                             {--O|colored-tx= : Define a Transaction Hash that will be used as the Transaction Output.}
                             {--I|colored-ix=0 : Define a Transaction Input index (Usually named "vout").}
@@ -68,6 +76,7 @@ class ColoredPay2ScriptHash
                             {--R|raw-amount= : Define the transaction RAW amount without fee in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--C|currency= : Define a custom currency for the Amount.}
                             {--c|colored-op= : Define a colored Operation (hexadecimal).}
+                            {--p|path=m/0 : Define the HD derivation path (BIP32).}
                             {--N|network=bitcoin : Define which Network must be used ("bitcoin" for Bitcoin Livenet).}';
 
     /**
@@ -78,11 +87,11 @@ class ColoredPay2ScriptHash
     protected $description = 'Utility for creating Colored Coins Multisig Pay to Script Hash transactions.';
 
     /**
-     * The IoC Container
-     * 
-     * @var \Illuminate\Container\Container
+     * The current blockchain network instance
+     *
+     * @var \BitWasp\Bitcoin\Network\Network
      */
-    protected $app;
+    protected $network;
 
     /**
      * Raw list of command line arguments
@@ -99,11 +108,34 @@ class ColoredPay2ScriptHash
     protected $publicKeys = [];
 
     /**
+     * List of public key By Hash
+     *
+     * Those hashes 20-bytes: RIPEMD160(SHA256(hash))
+     *
+     * @var array
+     */
+    protected $pubKeyByHash = [];
+
+    /**
      * List of Private Keys by their Public Key
      *
      * @var array
      */
     protected $privateByPub = [];
+
+    /**
+     * List of HD Keys
+     *
+     * @var array
+     */
+    protected $hdKeysByPub = [];
+
+    /**
+     * BIP32 Master Account (m/0)
+     *
+     * @var array
+     */
+    protected $masterHD = null;
 
     /**
      * Array of Smart Properties for Colored Coins
@@ -118,6 +150,17 @@ class ColoredPay2ScriptHash
         ],
     ];
 
+    static protected $strategies = [
+        "m/0",
+        "m/0/0",
+        "m/0'/0'",
+        "m/0'/0",
+        "m/44'/0'/0'",
+        "m/45'/0'/0'",
+        "m/48'/0'/0'",
+        "m/45'/2147483647/0",
+    ];
+
     /**
      * Handle command line arguments
      *
@@ -128,7 +171,12 @@ class ColoredPay2ScriptHash
         $our_opts = [
             'min' => null,
             'network' => "bitcoin",
-            "keys" => null,
+            "cosig1" => null,
+            "cosig1-password" => null,
+            "cosig2" => null,
+            "cosig2-password" => null,
+            "cosig3" => null,
+            "cosig3-password" => null,
             "to" => null,
             "colored-tx" => null,
             "colored-ix" => 0,
@@ -139,32 +187,103 @@ class ColoredPay2ScriptHash
             "colored-op" => null,
             "btc-input-tx" => null,
             "btc-input-ix" => 0,
+            "path" => "m/0",
         ];
 
         // parse command line arguments.
         $options  = array_intersect_key($this->option(), $our_opts);
 
-        // Parse WIF (Wallet Import Format) Private Keys
-        $wifs = explode(",", $options["keys"]);
-        $privKeys = [];
-        $publicKeys = [];
-        $privByPub = [];
-        foreach ($wifs as $wif) {
+        // Parse Mnemonics (up to 3)
+        $mnemonics = [];
+        if ($options["cosig1"]) array_push($mnemonics, $options["cosig1"]);
+        if ($options["cosig2"]) array_push($mnemonics, $options["cosig2"]);
+        if ($options["cosig3"]) array_push($mnemonics, $options["cosig3"]);
 
-            $priv = PrivateKeyFactory::fromWif($wif);
-            array_push($privKeys, $priv);
-            array_push($publicKeys, $priv->getPublicKey());
-
-            $privByPub[$priv->getPubKeyHash()->getHex()] = $priv;
-        }
-
-        // Sort public keys
-        $this->publicKeys = Buffertools::sort($publicKeys);
-        $this->privateByPub = $privByPub;
+        $options["mnemonics"] = $mnemonics;
 
         // store arguments
         $this->arguments = $options;
         return $this->arguments;
+    }
+
+    /**
+     * Load Hyperdeterministic Keys with given --cosig1, --cosig2
+     * and --cosig3 arguments. Currently at least one is obligatory.
+     *
+     * @param   \BitWasp\Bitcoin\Network\Network    $network
+     * @return  array
+     */
+    protected function setUpKeys(array $mnemonics, Network $network): array
+    {
+        if (empty($this->masterHD)) {
+            // create BIP39 Seed for HD Keys, create master backup for Copay (1st signer) 
+            // and then derive --path (m/44'/0'/0' is default)
+
+            $bip39Generator = new Bip39SeedGenerator();
+            $this->hdKeysByPub = [];
+            foreach ($mnemonics as $ix => $mnemonic) {
+
+                // password or empty pass
+                $pass = $this->arguments["cosig" . ($ix+1) . "-password"] ?: "";
+
+                // BIP39 seed generation
+                $bip39 = $bip39Generator->getSeed($mnemonic, $pass);
+                $mnemo32 = HierarchicalKeyFactory::fromEntropy(Buffer::hex($bip39->getHex()));
+
+                if ($ix === 0) {
+                    // first cosigner is the wallet creator
+                    // XPRV of this account is derived in CoPay!
+                    $bip32 = $mnemo32;
+
+                    // Master Backup Key
+                    $this->masterHD = $bip32;
+                }
+                else $bip32 = $this->masterHD;
+
+                // BIP32+BIP44: derive HD Key with derivation path provided through --path (or m/44'/0'/0')
+                $path  = $this->arguments["path"] ?: "m/44'/0'/0'";
+                $child = $mnemo32->derivePath($path);
+                $public = $child->getPublicKey();
+
+                // store HD Key (from which to build keypair)
+                $this->hdKeysByPub[$public->getHex()] = $child;
+                array_push($this->publicKeys, $public);
+            }
+
+            // Sort (by) public keys
+            //$this->publicKeys = Buffertools::sort($this->publicKeys);
+            //ksort($this->hdKeysByPub);
+
+            $this->info("");
+            $this->info("Cosignatories Data Provided: ");
+            $this->info("");
+            $this->info("  Master Backup XPRV: " . $this->masterHD->toExtendedPrivateKey());
+            $this->info("");
+            array_map(function($pub, $hd) {
+                
+                static $ix;
+                if (!$ix)
+                    $ix = 0;
+
+                $keyHash = $hd->getPublicKey()->getPubKeyHash()->getHex();
+                $address = $hd->getPublicKey()->getAddress()->getAddress();
+                $xpub    = $hd->toExtendedPublicKey($this->network);
+                $xprv    = $hd->toExtendedPrivateKey($this->network);
+                
+                $this->warn("  " . $ix . ") " . $pub);
+                $this->warn("    pubKeyHash: " . $keyHash);
+                $this->warn("    address: " . $address);
+                $this->warn("    XPUB: " . $xpub);
+                $this->warn("    XPRV: " . $xprv);
+                $this->info("");
+
+                $ix++;
+
+            }, array_keys($this->hdKeysByPub), array_values($this->hdKeysByPub));
+            //}, $this->publicKeys);
+        }
+
+        return $this->hdKeysByPub;
     }
 
     /**
@@ -180,6 +299,7 @@ class ColoredPay2ScriptHash
         $net = $this->arguments["network"] ?: "bitcoin";
         try {
             $network = NetworkFactory::$net();
+            $this->network = $network;
         }
         catch (Exception $e) {
             $this->error("Invalid Network provided: " . var_export($net, true));
@@ -195,12 +315,10 @@ class ColoredPay2ScriptHash
         $btcInputIndex        = $this->arguments["btc-input-ix"];
 
         $destination = $this->arguments["to"];
-        $privateKeys = $this->arguments["keys"] ?: "";
-        $wifs = explode(",", $privateKeys);
 
         // interpret / validate mandatory parameters
-        if (empty($wifs)) {
-            $this->error("Please specify a comma-separated list of Private Key WIFs with --keys.");
+        if (empty($this->arguments["mnemonics"])) {
+            $this->error("Please specify at least one (max. 3) cosignator mnemonic passphrase with --cosig1, --cosig2 and --cosig3.");
             return ;
         }
 
@@ -210,15 +328,16 @@ class ColoredPay2ScriptHash
         }
 
         if (empty($destination)) {
-            $this->error("Please specify a destination Address with --dest.");
+            $this->error("Please specify a destination Address with --to.");
             return ;
         }
 
         if (! array_key_exists($currencySlug, $this->currencyProps)) {
-            $this->error("Provided currency '" . $currencySlug . "' is not present in `currencyProps`.");
+            $this->error("Provided currency '" . $currencySlug . "' is not present in `currencyProps` (Not supported).");
             return ;
         }
 
+        $this->info("");
         $this->info("Now preparing transaction..");
 
         $props = $this->currencyProps[$currencySlug];
@@ -227,52 +346,69 @@ class ColoredPay2ScriptHash
         $address = AddressFactory::fromString($destination, $network);
 
         // Create Outpoint from --transaction hash.
-        $outpoint = new Outpoint(Buffer::hex($coloredTransactionId), $coloredInputIndex);
-        $outpointFee = new Outpoint(Buffer::hex($btcTransactionId), $btcInputIndex);
+        $coloredInput = new Outpoint(Buffer::hex($coloredTransactionId), $coloredInputIndex);
+        $btcInput     = new Outpoint(Buffer::hex($btcTransactionId), $btcInputIndex);
 
-        // Script is P2SH | P2WSH | P2PKH
-        $redeemScript   = ScriptFactory::scriptPubKey()->multisig($minCosignatories, $this->publicKeys, true);
-        $p2shScript     = new P2shScript($redeemScript);
-        $outputScript   = $p2shScript->getOutputScript();
+        $cntTrials = 0;
+        //do {
+            // this will automatically derivat paths to find the right signature
+            $this->setUpKeys($this->arguments["mnemonics"], $network);
 
-        //$colorRedeem    = ScriptFactory::scriptPubKey()->multisig($minCosignatories, $this->publicKeys, false);
-        //$colorP2SH      = new P2shScript($colorRedeem);
-        //$colorOutput    = $colorP2SH->getOutputScript();
+            // create Multisig redeem script
+            // public keys are *NOT SORTED*. Order provided through --keys matters.
+            $multisigAddress = new MultisigHD($minCosignatories, $this->arguments["path"], array_values($this->hdKeysByPub), new HierarchicalKeySequence(), true);
+            $multisigScript = $multisigAddress->getRedeemScript();
+            //$childAddress = $multisigAddress->derivePath($this->argument["path"]);
+            
+            //$redeemScript   = ScriptFactory::scriptPubKey()->multisig($minCosignatories, $this->publicKeys, false);
+            $p2shScript     = $multisigScript;//new P2shScript($redeemScript);
+            $outputScript   = $multisigScript->getOutputScript(); //$p2shScript->getOutputScript();
 
-        // Define coloring operation
-        $colorOperation = $this->arguments["colored-op"] ?: "6f6d6e69000000000000001f000000002faf0800";
-        $colorScript    = ScriptFactory::create()->sequence([
-                            Opcodes::OP_RETURN, Buffer::hex($colorOperation)]);
+            //$feeMSig   = new MultisigHD($minCosignatories, $this->arguments["path"], array_values($this->hdKeysByPub), new HierarchicalKeySequence(), true);
+            //$feeOutput = $feeMSig->getRedeemScript()->getOutputScript();
 
-        // prepare transaction fee and amount
-        $fee    = (int) $this->arguments["fee"] ?: 100030; // 0.001.. BTC
-        $amount = (int) $this->arguments["raw-amount"] ?: ($this->arguments["amount"] ?: 8) * pow(10, $props["divisibility"]); // 8 USDT
+            // Define coloring operation
 
-        // create new transaction output
-        //$total  = $amount + $fee;
-        $txOut  = new TransactionOutput($fee, $outputScript);
-        $txOutCol = new TransactionOutput(0, $outputScript);
+            $colorScript = $this->interpretColoredInput();
 
-        // bundle it together..
-        $transaction = TransactionFactory::build()
-                            ->spendOutPoint($outpoint, $outputScript)
-                            ->spendOutPoint($outpointFee, $outputScript/*$colorOutput*/)
-                            ->output(0, $colorScript->getScript())
-                            ->output($fee, $outputScript)
-                            ->get();
+            // prepare transaction fee and amount
+            $fee    = (int) $this->arguments["fee"] ?: 100030; // 0.001.. BTC
+            $amount = (int) $this->arguments["raw-amount"] ?: ($this->arguments["amount"] ?: 8) * pow(10, $props["divisibility"]); // 8 USDT
 
-        // Sign transaction and display details
-        $signed = $this->signTransaction($transaction, $p2shScript, [$txOut, $txOutCol]);
+            // create new transaction output
+            //$total  = $amount + $fee;
+            $txOut  = new TransactionOutput($fee, $outputScript);
+            //$txOutCol = new TransactionOutput(0, $outputScript);
 
-        // get human-readable inputs and outputs
-        list($inputs,
-             $outputs) = $this->formatTransactionContent($transaction);
+            // bundle it together..
+            $transaction = TransactionFactory::build()
+                                ->spendOutPoint($coloredInput, $outputScript)
+                                ->spendOutPoint($btcInput, $outputScript) // Pay BTC Fee
+                                ->output($fee, $colorScript->getScript())
+                                ->get();
 
-        $txData = [
-            "version" => $transaction->getVersion(),
-            "inputs"  => $inputs,
-            "outputs" => $outputs
-        ];
+            // Sign transaction and display details
+            $signed = $this->signTransaction($transaction, $p2shScript, [$txOut/*, $txOutCol*/]);
+
+            // get human-readable inputs and outputs
+            list($inputs,
+                $outputs) = $this->formatTransactionContent($transaction);
+
+            $txData = [
+                "version" => $transaction->getVersion(),
+                "inputs"  => $inputs,
+                "outputs" => $outputs
+            ];
+
+            //$hmac = str_replace(["OP_HASH160 ", " OP_EQUAL"], "", $inputs[0]);
+            //$this->warn("HMAC: " . $hmac);
+        //}
+        //while (++$cntTrials < 10000 && $hmac != "666e5e7041cd7a9df7075d2f3fc79b6d53df7963");
+
+        //if ($hmac != "666e5e7041cd7a9df7075d2f3fc79b6d53df7963") {
+        //    $this->error("Could not derive and sign to the right hash!");
+        //    return ;
+        //}
 
         // print details about transaction.
         $this->info("");
@@ -310,6 +446,50 @@ class ColoredPay2ScriptHash
         $this->info("");
 
         return ;
+    }
+
+    protected function interpretColoredInput()
+    {
+        $colorOperation = $this->arguments["colored-op"] ?: "6f6d6e69000000000000001f000000002faf0800";
+        $scriptHashBuf  = Buffer::hex($colorOperation);
+
+        $convert = new IntegerConvert;
+
+        $verBuf  = $scriptHashBuf->slice(0,2);
+        $typeBuf = $scriptHashBuf->slice(2,2);
+        $propBuf = $scriptHashBuf->slice(4,4);
+        $valBuf  = $scriptHashBuf->slice(8,8);
+
+        $version = $convert->flip($verBuf, 2, true, true);
+        $txType  = $convert->flip($typeBuf, 2, true, true);
+        $prop = $convert->flip($propBuf, 4, true, true);
+        $value = $convert->flip($valBuf, 8, true, true);
+
+        dd($version, $txType, $prop, $value);
+
+        $hashes  = [$version->getHex(), $txType->getHex(), $prop->getHex(), $value->getHex()];
+        $numbers = [$version->getGmp(), $txType->getGmp(), $prop->getGmp(), $value->getGmp()];
+        $this->warn("hex: " . implode(" ", $hashes));
+        $this->warn("numbers: " . implode(" ", $numbers));
+        exit;
+
+        $colorScript    = ScriptFactory::create()->sequence([Opcodes::OP_RETURN, Buffer::hex($colorOperation)]);
+    }
+
+    public function uInt64($i, $endianness=false) {
+        $f = is_int($i) ? "pack" : "unpack";
+
+        if ($endianness === true) {  // big-endian
+            $i = $f("J", $i);
+        }
+        else if ($endianness === false) {  // little-endian
+            $i = $f("P", $i);
+        }
+        else if ($endianness === null) {  // machine byte order
+            $i = $f("Q", $i);
+        }
+
+        return is_array($i) ? $i[1] : $i;
     }
 
     /**
@@ -350,16 +530,26 @@ class ColoredPay2ScriptHash
                         ->p2sh($script);
 
         $inputs = [];
+        $hashes = array_keys($this->pubKeyByHash);
         for ($ix = 0; $ix < $minCosignatories; $ix++) :
 
             // Iterate through SORTED PUBLIC KEYS because this defines
             // the signature order for multisignature transactions!
             $pub  = $this->publicKeys[$ix];
-            $priv = $this->privateByPub[$pub->getPubKeyHash()->getHex()];
+            //$priv = $this->privateByPub[$pub->getPubKeyHash()->getHex()];
+            $hd = $this->hdKeysByPub[$pub->getHex()];
+
+            if (!$hd->isPrivate()) {
+                $this->error("Skipped public key: " . $hd->getPublicKey()->getHex());
+                continue;
+            }
+
+            // load private key WIF from HD Key
+            $priv = $hd->getPrivateKey();
 
             for ($o = 0, $m = count($outputs); $o < $m; $o++) :
                 // sign with current cosigner
-                $input  = $signer->input(0, $outputs[$o], $signData);
+                $input  = $signer->input($o, $outputs[$o], $signData);
                 $input->sign($priv);
 
                 array_push($inputs, $input);
