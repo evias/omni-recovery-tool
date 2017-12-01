@@ -347,7 +347,7 @@ class ColoredPay2ScriptHash
 
         // Create Outpoint from --transaction hash.
         $coloredInput = new Outpoint(Buffer::hex($coloredTransactionId), $coloredInputIndex);
-        $btcInput     = new Outpoint(Buffer::hex($btcTransactionId), $btcInputIndex);
+        //$btcInput     = new Outpoint(Buffer::hex($btcTransactionId), $btcInputIndex);
 
         $cntTrials = 0;
         //do {
@@ -377,14 +377,14 @@ class ColoredPay2ScriptHash
 
             // create new transaction output
             //$total  = $amount + $fee;
-            $txOut  = new TransactionOutput($fee, $outputScript);
+            $txOut  = new TransactionOutput($fee, $colorScript->getOutputScript());
             //$txOutCol = new TransactionOutput(0, $outputScript);
 
             // bundle it together..
             $transaction = TransactionFactory::build()
                                 ->spendOutPoint($coloredInput, $outputScript)
-                                ->spendOutPoint($btcInput, $outputScript) // Pay BTC Fee
-                                ->output($fee, $colorScript->getScript())
+          //                      ->spendOutPoint($btcInput, $outputScript) // Pay BTC Fee
+                                ->output(0, $colorScript->getOutputScript())
                                 ->get();
 
             // Sign transaction and display details
@@ -463,17 +463,18 @@ class ColoredPay2ScriptHash
         $version = $convert->flip($verBuf, 2, true, true);
         $txType  = $convert->flip($typeBuf, 2, true, true);
         $prop = $convert->flip($propBuf, 4, true, true);
-        $value = $convert->flip($valBuf, 8, true, true);
-
-        dd($version, $txType, $prop, $value);
+        $value = $convert->flip($valBuf, 8, true, true); //XXX re-check endianness
 
         $hashes  = [$version->getHex(), $txType->getHex(), $prop->getHex(), $value->getHex()];
-        $numbers = [$version->getGmp(), $txType->getGmp(), $prop->getGmp(), $value->getGmp()];
-        $this->warn("hex: " . implode(" ", $hashes));
-        $this->warn("numbers: " . implode(" ", $numbers));
+        $numbers = [$version->getInt(), $txType->getInt(), $prop->getInt(), $value->getInt()];
+
+        $this->warn("Origin Script: " . $scriptHashBuf->getHex());
+        $this->warn("Hexadecimal Values: " . implode(" ", $hashes));
+        $this->warn("Integer Values: " . implode(" ", $numbers));
         exit;
 
-        $colorScript    = ScriptFactory::create()->sequence([Opcodes::OP_RETURN, Buffer::hex($colorOperation)]);
+        $colorScript = ScriptFactory::create()->sequence([Opcodes::OP_RETURN, Buffer::hex($colorOperation)]);
+        return $colorScript;
     }
 
     public function uInt64($i, $endianness=false) {
