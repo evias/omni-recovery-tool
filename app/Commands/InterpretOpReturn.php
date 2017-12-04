@@ -139,6 +139,15 @@ class InterpretOpReturn
         return ;
     }
 
+    /**
+     * Parse a raw hexadecimal colored coin payload.
+     *
+     * @example:
+     *   6f6d6e69000000000000001f000000002faf0800
+     *
+     * @param   string  $colorOperation
+     * @return  array
+     */
     protected function parseHex($colorOperation)
     {
         // bufferize
@@ -161,6 +170,17 @@ class InterpretOpReturn
         return $parsed;
     }
 
+    /**
+     * This method uses the IntegerConvert helper to read buffers
+     * inner content as Big Endian, Little Endians and Machine Code
+     * [Un]signed Integers.
+     *
+     * The hexadecimal content of each part of the payload can be
+     * converted to Integer values with this method.
+     *
+     * @param   array   $buffers    Pre-Sliced payload parts
+     * @return  array
+     */
     protected function getInnerData(array $buffers)
     {
         $convert = new IntegerConvert;

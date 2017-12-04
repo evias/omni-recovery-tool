@@ -75,6 +75,7 @@ class ColoredPay2ScriptHash
                             {--i|btc-input-ix= : Define a Fee Input Transaction index.}
                             {--B|bitcoin= : Define a Bitcoin Amount for the transaction in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--A|amount= : Define the transaction amount without fee in Satoshi (0.00000001 BTC = 1 Sat).}
+                            {--D|dust-amount= : Define the dust output amount in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--R|raw-amount= : Define the transaction RAW amount without fee in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--C|currency= : Define a custom currency for the Amount.}
                             {--c|colored-op= : Define a colored Operation (hexadecimal).}
@@ -186,6 +187,7 @@ class ColoredPay2ScriptHash
             "colored-ix" => 0,
             "bitcoin" => null,
             "amount" => null,
+            "dust-amount" => null,
             "currency" => "USDT",
             "raw-amount" => null,
             "colored-op" => null,
@@ -335,7 +337,7 @@ class ColoredPay2ScriptHash
         }
 
         if (empty($destination)) {
-            $this->error("Please specify a destination Address with --to.");
+            $this->error("Please specify a destination Address with --destination.");
             return ;
         }
 
@@ -361,37 +363,29 @@ class ColoredPay2ScriptHash
         $this->setUpKeys($this->arguments["mnemonics"], $network);
 
         // create Multisig redeem script
-        // public keys are *NOT SORTED*. Order provided through --keys matters.
         $multisigAddress = new MultisigHD($minCosignatories, $this->arguments["path"], array_values($this->hdKeysByPub), new HierarchicalKeySequence(), true);
         $multisigScript = $multisigAddress->getRedeemScript();
-        //$childAddress = $multisigAddress->derivePath($this->argument["path"]);
-
-        //$redeemScript   = ScriptFactory::scriptPubKey()->multisig($minCosignatories, $this->publicKeys, false);
-        $p2shScript     = $multisigScript;//new P2shScript($redeemScript);
-        $outputScript   = $multisigScript->getOutputScript(); //$p2shScript->getOutputScript();
-
-        //$feeMSig   = new MultisigHD($minCosignatories, $this->arguments["path"], array_values($this->hdKeysByPub), new HierarchicalKeySequence(), true);
-        //$feeOutput = $feeMSig->getRedeemScript()->getOutputScript();
+        $p2shScript     = $multisigScript;
+        $outputScript   = $multisigScript->getOutputScript();
 
         // Define coloring operation
-
-        $colorScript = $this->interpretColoredInput();
+        $colorScript = $this->getColoredScript();
 
         // prepare transaction fee and amount
-        $bitcoin = (int) $this->arguments["bitcoin"];//XXX function createOmniPayload => create OP_RETURN command from property and amount
-        $amount = (int) $this->arguments["raw-amount"] ?: ($this->arguments["amount"] ?: 8) * pow(10, $props["divisibility"]); // 8 USDT
+        $bitcoin = (int) $this->arguments["bitcoin"];
+        $dustAmt = (int) $this->arguments["dust-amount"] ?: 1500;
 
         // create new transaction output
         $txOutCol = new TransactionOutput(0, $outputScript);
-        $txOut  = new TransactionOutput($amount - 50000, $outputScript); // leave 0.00050000 BTC for fee
+        $txOut  = new TransactionOutput($bitcoin - 50000, $outputScript); // leave 0.00050000 BTC for fee
 
         // bundle it together..
         $transaction = TransactionFactory::build()
                             ->spendOutPoint($coloredInput, $outputScript)
                             ->spendOutPoint($btcInput, $outputScript) // Pay BTC Fee
                             ->output(0, $colorScript)
-                            ->payToAddress(2500, $addressColor) // Small but Non-Dust => destination for colored coins
-                            ->payToAddress($bitcoin - 50000, $addressChange) // 0.00050000 Fee
+                            ->payToAddress($dustAmt, $addressColor) // Small but Non-"Dust" => destination for colored coins
+                            ->payToAddress($bitcoin - 50000, $addressChange) // Leave 0.00050000 BTC for Fee
                             ->get();
 
         $this->info("  Before Signing: " . $transaction->getBuffer()->getSize() . " Bytes");
@@ -450,32 +444,23 @@ class ColoredPay2ScriptHash
         return ;
     }
 
-    protected function interpretColoredInput()
+    /**
+     * This method will return the colored script operation.
+     *
+     * This should return a sequence of buffers parsed into a Bitcoin script.
+     *
+     * @return  \BitWasp\Bitcoin\Script\ScriptInterface
+     */
+    protected function getColoredScript()
     {
-        $colorOperation = $this->arguments["colored-op"] ?: "6f6d6e69000000000000001f000000002faf0800";
-        $scriptHashBuf  = Buffer::hex($colorOperation);
+        $rawOperation = $this->arguments["colored-op"] ?: "6f6d6e69000000000000001f000000002faf0800";
+        $operations   = [
+            Opcodes::OP_RETURN,
+            Buffer::hex($rawOperation),
+            Opcodes::OP_EQUAL
+        ];
 
-        $convert = new IntegerConvert;
-
-        $verBuf  = $scriptHashBuf->slice(0,2);
-        $typeBuf = $scriptHashBuf->slice(2,2);
-        $propBuf = $scriptHashBuf->slice(4,4);
-        $valBuf  = $scriptHashBuf->slice(8,8);
-
-        $version = $convert->flip($verBuf, 2, true, true);
-        $txType  = $convert->flip($typeBuf, 2, true, true);
-        $prop = $convert->flip($propBuf, 4, true, true);
-        $value = $convert->flip($valBuf, 8, true, true); //XXX re-check endianness
-
-        $hashes  = [$version->getHex(), $txType->getHex(), $prop->getHex(), $value->getHex()];
-        $numbers = [$version->getInt(), $txType->getInt(), $prop->getInt(), $value->getInt()];
-
-        //$this->warn("Origin Script: " . $scriptHashBuf->getHex());
-        //$this->warn("Hexadecimal Values: " . implode(" ", $hashes));
-        //$this->warn("Integer Values: " . implode(" ", $numbers));
-        //exit;
-
-        $colorScript = ScriptFactory::create()->sequence([Opcodes::OP_RETURN, Buffer::hex($colorOperation), Opcodes::OP_EQUAL]);
+        $colorScript  = ScriptFactory::create()->sequence($operations);
         return $colorScript->getScript();
     }
 
