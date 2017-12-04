@@ -60,7 +60,11 @@ class InterpretOpReturn
      */
     protected $signature = 'script:op-return
                             {--A|asm= : Define an OP RETURN Operation.}
-                            {--H|hex= : Define an OP_RETURN Hexadecimal content.}';
+                            {--H|hex= : Define an OP_RETURN Hexadecimal content.}
+                            {--p|property=USDT : Create a OP_RETURN payload for a said Smart Property Identifier (USDT = 31 ; MasterCoin = 1).}
+                            {--a|amount=1 : Create a OP_RETURN payload for a said Amount of the set property.}
+                            {--R|raw-amount=100000000 : Create a OP_RETURN payload for a said Amount of Satoshis of the set property (1 Sat = 0.00000001 BTC).}
+                            {--D|decimals=8 : Define a count of decimal places for the set property (Default to 8).}';
 
     /**
      * The console command description.
@@ -85,6 +89,11 @@ class InterpretOpReturn
     {
         $our_opts = [
             'asm' => null,
+            "hex" => null,
+            "property" => "USDT",
+            "amount" => 1,
+            "raw-amount" => 100000000,
+            "decimals" => 8,
         ];
 
         // parse command line arguments.
@@ -105,21 +114,34 @@ class InterpretOpReturn
         $this->setUp();
 
         $asmScript = $this->arguments["asm"] ?: "";
-        if (empty($asmScript)) {
-            $this->error("Please provide a OP_RETURN script with --asm (-c). Example: -c 'OP_RETURN 6f6d6e69000000000000001f000000002faf0800'.");
+        $hexScript = $this->arguments["hex"] ?: "";
+        $property  = $this->arguments["property"] ?: "USDT";
+        $decimals  = $this->arguments["decimals"] ?: 8;
+        $amount    = (int) ($this->arguments["raw-amount"] ?: ($this->arguments["amount"] ?: 1) * pow(10, 8));
+
+        if (empty($asmScript) && empty($hexScript)) {
+            // create Hexadecimal Payload
+            dd($this->arguments);
+            return ;
+        }
+
+        // validate ASM content (opcodes + hexadecimal allowed, nothing more)
+        $parts = [];
+        if (!empty($asmScript) && ! (bool) preg_match("/^(OP_[A-Z0-9]+\s)*([a-f0-9]+)(\sOP_[A-Z0-9]+)*/", $asmScript, $parts)) {
+            $this->error("Please provide a valid OP_RETURN script with --asm (-A). Example: -A 'OP_RETURN 6f6d6e69000000000000001f000000002faf0800 OP_EQUAL'.");
+            return ;
+        }
+        // valid HEX content (only hexadecimal payload allowed)
+        elseif (!empty($hexScript) && ! (bool) preg_match("/^([a-f0-9]+)/", $hexScript)) {
+            $this->error("Please provide a valid OP_RETURN script PAYLOAD with --hex (-H). Example: -H '6f6d6e69000000000000001f000000002faf0800'.");
             return ;
         }
 
         $this->info("");
         $this->info("Now reading OP_RETURN..");
 
-        $parts = explode(" ", $asmScript);
-        if (empty($parts)) {
-            $this->error("Malformed OP_RETURN human readable script entered with --asm (-c). Example: -c 'OP_RETURN 6f6d6e69000000000000001f000000002faf0800'.");
-            return ;
-        }
-
-        $script = strpos($asmScript, "OP_RETURN ") === 0 ? $parts[1] : $parts[0];
+        // parse Raw Hexadecimal script
+        $script = !empty($parts[2]) ? $parts[2] : $hexScript;
         $parsed = $this->parseHex($script);
 
         $currentPos = 0;

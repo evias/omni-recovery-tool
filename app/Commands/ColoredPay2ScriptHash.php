@@ -74,10 +74,9 @@ class ColoredPay2ScriptHash
                             {--F|btc-input-tx= : Define a Fee Input Transaction Hash (From where to pay fees).}
                             {--i|btc-input-ix= : Define a Fee Input Transaction index.}
                             {--B|bitcoin= : Define a Bitcoin Amount for the transaction in Satoshi (0.00000001 BTC = 1 Sat).}
-                            {--A|amount= : Define the transaction amount without fee in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--D|dust-amount= : Define the dust output amount in Satoshi (0.00000001 BTC = 1 Sat).}
-                            {--R|raw-amount= : Define the transaction RAW amount without fee in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--C|currency= : Define a custom currency for the Amount.}
+                            {--R|raw-amount= : Define the transaction RAW amount without fee in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--c|colored-op= : Define a colored Operation (hexadecimal).}
                             {--p|path=m/0 : Define the HD derivation path (BIP32).}
                             {--N|network=bitcoin : Define which Network must be used ("bitcoin" for Bitcoin Livenet).}
