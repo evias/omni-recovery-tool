@@ -79,7 +79,8 @@ class ColoredPay2ScriptHash
                             {--C|currency= : Define a custom currency for the Amount.}
                             {--c|colored-op= : Define a colored Operation (hexadecimal).}
                             {--p|path=m/0 : Define the HD derivation path (BIP32).}
-                            {--N|network=bitcoin : Define which Network must be used ("bitcoin" for Bitcoin Livenet).}';
+                            {--N|network=bitcoin : Define which Network must be used ("bitcoin" for Bitcoin Livenet).}
+                            {--E|use-elligius : Define wheter to use Elligius Miner PushTx API (non-standard tx accepted).}';
 
     /**
      * The console command description.
@@ -191,6 +192,7 @@ class ColoredPay2ScriptHash
             "btc-input-tx" => null,
             "btc-input-ix" => 0,
             "path" => "m/0",
+            "use-elligius" => false,
         ];
 
         // parse command line arguments.
@@ -203,6 +205,7 @@ class ColoredPay2ScriptHash
         if ($options["cosig3"]) array_push($mnemonics, $options["cosig3"]);
 
         $options["mnemonics"] = $mnemonics;
+        $options["use-elligius"] = !empty($options["use-elligius"]);
 
         // store arguments
         $this->arguments = $options;
@@ -472,24 +475,8 @@ class ColoredPay2ScriptHash
         //$this->warn("Integer Values: " . implode(" ", $numbers));
         //exit;
 
-        $colorScript = ScriptFactory::create()->sequence([Opcodes::OP_RETURN, Buffer::hex($colorOperation)]);
+        $colorScript = ScriptFactory::create()->sequence([Opcodes::OP_RETURN, Buffer::hex($colorOperation), Opcodes::OP_EQUAL]);
         return $colorScript->getScript();
-    }
-
-    public function uInt64($i, $endianness=false) {
-        $f = is_int($i) ? "pack" : "unpack";
-
-        if ($endianness === true) {  // big-endian
-            $i = $f("J", $i);
-        }
-        else if ($endianness === false) {  // little-endian
-            $i = $f("P", $i);
-        }
-        else if ($endianness === null) {  // machine byte order
-            $i = $f("Q", $i);
-        }
-
-        return is_array($i) ? $i[1] : $i;
     }
 
     /**
@@ -621,9 +608,17 @@ class ColoredPay2ScriptHash
      */
     protected function broadcastTransaction(Transaction $signed)
     {
-        // broadcast raw transaction using Smartbit API sandbox
-        $params = json_encode(["hex" => $signed->getHex()]);
-        $handle = curl_init("https://api.smartbit.com.au/v1/blockchain/pushtx");
+        $paramKey = "hex";
+        $apiUrl   = "https://api.smartbit.com.au/v1/blockchain/pushtx";
+        if ($this->arguments["use-elligius"]) {
+            $paramKey = "transaction";
+            $apiUrl = "http://eligius.st/~wizkid057/newstats/pushtxn.php";
+        }
+
+        // broadcast raw transaction
+        $params = json_encode([$paramKey => $signed->getHex()]);
+        $handle = curl_init($apiUrl);
+        
         curl_setopt_array($handle, [
             CURLOPT_POST => true,
             CURLOPT_RETURNTRANSFER => true,
@@ -637,6 +632,15 @@ class ColoredPay2ScriptHash
         if ($response === false) {
             $this->error(curl_error($handle));
             return [];
+        }
+
+        if ($this->arguments["use-elligius"]) {
+            // Elligius does not return JSON
+            $data = [
+                "success" => strpos($response, "Response = 1") !== false,
+                "body" => $response,
+            ];
+            return $data;
         }
 
         $data = json_decode($response, true); // $assoc=true
