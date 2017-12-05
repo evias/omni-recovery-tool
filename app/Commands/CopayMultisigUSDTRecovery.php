@@ -69,8 +69,12 @@ class CopayMultisigUSDTRecovery
                             {--c3p|cosig3-password= : Define a Password for cosignator 3.}
                             {--d|destination= : Define a destination Address for the Colored Coins.}
                             {--d2|change= : Define a *Change* destination Address (rest BTC).}
-                            {--t|input= : Define a Input Transaction Hash (From where to pay fees).}
-                            {--i|vindex=0 : Define a Input Transaction index.}
+                            {--t1|input1= : Define a Input Transaction Hash #1 (From where to pay fees).}
+                            {--i1|vindex1=0 : Define a Input Transaction Index #1.}
+                            {--t2|input2= : Define a Input Transaction Hash #2 (From where to pay fees).}
+                            {--i2|vindex2=0 : Define a Input Transaction Index #2.}
+                            {--t3|input3= : Define a Input Transaction Hash #3 (From where to pay fees).}
+                            {--i3|vindex3=0 : Define a Input Transaction Index #3.}
                             {--B|bitcoin= : Define a Bitcoin Amount for the transaction in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--D|dust-amount= : Define the dust output amount in Satoshi (Default 5600 Sat - reference amount OMNI) (0.00000001 BTC = 1 Sat).}
                             {--C|currency=USDT : Define a custom currency for the Amount (Default USDT).}
@@ -183,8 +187,12 @@ class CopayMultisigUSDTRecovery
             "dust-amount" => null,
             "currency" => "USDT",
             "colored-op" => null,
-            "input" => null,
-            "vindex" => 0,
+            "input1" => null,
+            "vindex1" => 0,
+            "input2" => null,
+            "vindex2" => 0,
+            "input3" => null,
+            "vindex3" => 0,
             "path" => "m/0",
             "use-elligius" => false,
         ];
@@ -316,8 +324,6 @@ class CopayMultisigUSDTRecovery
         // read parameters..
         $currencySlug  = strtoupper($this->arguments["currency"] ?: "USDT");
         $minCosignatories     = (int) $this->arguments["min"] ?: 1;
-        $btcTransactionId     = $this->arguments["input"];
-        $btcInputIndex        = $this->arguments["vindex"];
 
         $destination   = $this->arguments["destination"];
         $changeAddress = $this->arguments["change"] ?: $this->arguments["destination"];
@@ -325,6 +331,11 @@ class CopayMultisigUSDTRecovery
         // interpret / validate mandatory parameters
         if (empty($this->arguments["mnemonics"])) {
             $this->error("Please specify at least one (max. 3) cosignator mnemonic passphrase with --cosig1, --cosig2 and --cosig3.");
+            return ;
+        }
+
+        if (empty($this->arguments["input1"])) {
+            $this->error("Please specify at least one (max. 3) transaction id which will be used for as Input with --input1, --input2 and --input3");
             return ;
         }
 
@@ -348,7 +359,9 @@ class CopayMultisigUSDTRecovery
         $addressChange = AddressFactory::fromString($changeAddress, $network);
 
         // Create Outpoint from --transaction hash.
-        $btcInput = new Outpoint(Buffer::hex($btcTransactionId), $btcInputIndex);
+        $firstInput  = new Outpoint(Buffer::hex($this->arguments["input1"]), $this->arguments["vindex1"]);
+        $secondInput = $this->arguments["input2"] ? new Outpoint(Buffer::hex($this->arguments["input2"]), $this->arguments["vindex2"]) : null;
+        $thirdInput  = $this->arguments["input3"] ? new Outpoint(Buffer::hex($this->arguments["input3"]), $this->arguments["vindex3"]) : null;
 
         // this will automatically derive paths to find the right signature
         $this->setUpKeys($this->arguments["mnemonics"], $network);
@@ -368,11 +381,33 @@ class CopayMultisigUSDTRecovery
 
         // create new transaction output
         $txOut = new TransactionOutput($bitcoin - 50000, $outputScript); // leave 0.00050000 BTC for fee
+        $txOutCol = new TransactionOutput($dustAmt, $outputScript); // dust amount for omni destination
 
-        // bundle it together..
-        $transaction = TransactionFactory::build()
-                            ->spendOutPoint($btcInput, $outputScript) // Pay BTC Fee
-                            ->output(0, $colorScript)
+        // Now construct transaction with built outpoints and outputs.
+        $transaction = TransactionFactory::build();
+        $txInputs    = [$firstInput];
+        $txOutputs   = [
+            0 => ['inputs' => [0], 'output' => $txOut],
+            1 => ['inputs' => [0], 'output' => $txOutCol]
+        ];
+
+        // spend --input1
+        $transaction = $transaction->spendOutpoint($firstInput, $outputScript);
+
+        if ($secondInput) {
+            // spend --input2
+            array_push($txInputs, $secondInput);
+            $transaction = $transaction->spendOutpoint($secondInput, $outputScript);
+        }
+
+        if ($thirdInput) {
+            // spend --input3
+            array_push($txInputs, $secondInput);
+            $transaction = $transaction->spendOutpoint($thirdInput, $outputScript);
+        }
+
+        // create outputs (order important)
+        $transaction = $transaction->output(0, $colorScript)
                             ->payToAddress($bitcoin - 50000, $addressChange) // Change Output must be first + Leave 0.00050000 BTC for Fee
                             ->payToAddress($dustAmt, $addressColor) // Last non-sender output address is Destination of USDT.
                             ->get();
@@ -383,7 +418,7 @@ class CopayMultisigUSDTRecovery
         $this->info("");
 
         // Sign transaction and display details
-        $signed = $this->signTransaction($transaction, $p2shScript, [$txOut]);
+        $signed = $this->signTransaction($transaction, $p2shScript, $txOutputs);
 
         // get human-readable inputs and outputs
         list($inputs,
@@ -496,38 +531,37 @@ class CopayMultisigUSDTRecovery
 
             // Iterate through SORTED PUBLIC KEYS because this defines
             // the signature order for multisignature transactions!
-            $pub  = $this->publicKeys[$ix];
-            //$priv = $this->privateByPub[$pub->getPubKeyHash()->getHex()];
-            $hd = $this->hdKeysByPub[$pub->getHex()];
+            $pub = $this->publicKeys[$ix];
+            $hdk = $this->hdKeysByPub[$pub->getHex()];
 
-            if (!$hd->isPrivate()) {
-                $this->error("Skipped public key: " . $hd->getPublicKey()->getHex());
+            if (!$hdk->isPrivate()) {
+                $this->error("Skipped public key: " . $hdk->getPublicKey()->getHex());
                 continue;
             }
 
             // load private key WIF from HD Key
-            $priv = $hd->getPrivateKey();
+            $cosignerPrivate = $hdk->getPrivateKey();
 
-            for ($o = 0, $m = count($outputs); $o < $m; $o++) :
-                // sign with current cosigner
-                
-                try {
-                    $output = $outputs[$o];
+            foreach ($outputs as $o => $outputSpec): 
 
-                    //if ($output->hasRedeemScript())
-                    //    $input = $signer->input($o, $output->getRedeemScript(), $signData);
-                    //else
-                        $input = $signer->input($o, $output, $signData);
+                $output = $outputSpec["output"];
+                $currentIns = $outputSpec["inputs"];
 
-                    $input->sign($priv);
-                }
-                catch (RuntimeException $e) {
-                    $this->error($e->getMessage());
-                    dd($outputs[$o]);
-                }
+                for ($i = 0, $cnt = count($currentIns); $i < $cnt; $i++) :
+                    // sign each input needed for output
 
-                array_push($inputs, $input);
-            endfor;
+                    try {
+                        $input = $signer->input($currentIns[$i], $output, $signData);
+                        $input->sign($cosignerPrivate);
+
+                        array_push($inputs, $input);
+                    }
+                    catch (RuntimeException $e) {
+                        $this->error($e->getMessage());
+                        dd($outputs[$o]);
+                    }
+                endfor;
+            endforeach;
         endfor;
 
         // process signatures and mutate transaction
