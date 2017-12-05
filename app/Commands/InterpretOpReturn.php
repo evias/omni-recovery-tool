@@ -63,7 +63,7 @@ class InterpretOpReturn
                             {--H|hex= : Define an OP_RETURN Hexadecimal content.}
                             {--p|property=USDT : Create a OP_RETURN payload for a said Smart Property Identifier (USDT = 31 ; MasterCoin = 1).}
                             {--a|amount=1 : Create a OP_RETURN payload for a said Amount of the set property.}
-                            {--R|raw-amount=100000000 : Create a OP_RETURN payload for a said Amount of Satoshis of the set property (1 Sat = 0.00000001 BTC).}
+                            {--R|raw-amount= : Create a OP_RETURN payload for a said Amount of Satoshis of the set property (1 Sat = 0.00000001 BTC).}
                             {--D|decimals=8 : Define a count of decimal places for the set property (Default to 8).}';
 
     /**
@@ -79,6 +79,19 @@ class InterpretOpReturn
      * @var array
      */
     protected $arguments = [];
+
+    /**
+     * Array of Smart Properties for Colored Coins
+     *
+     * @var array
+     */
+    protected $currencyProps = [
+        "USDT" => [
+            "currencyId" => 31,
+            "currency_str" => "Smart Property",
+            "divisibility" => 8,
+        ],
+    ];
 
     /**
      * Handle command line arguments
@@ -113,17 +126,31 @@ class InterpretOpReturn
     {
         $this->setUp();
 
+        // read command line arguments data
         $asmScript = $this->arguments["asm"] ?: "";
         $hexScript = $this->arguments["hex"] ?: "";
         $property  = $this->arguments["property"] ?: "USDT";
         $decimals  = $this->arguments["decimals"] ?: 8;
-        $amount    = (int) ($this->arguments["raw-amount"] ?: ($this->arguments["amount"] ?: 1) * pow(10, 8));
+        $amount    = (int) $this->arguments["amount"] ?: 1;
 
+        // if --amount is used, then the raw amount is calculated by adding 0s.
+        $rawAmount = (int) ($this->arguments["raw-amount"] ?: ($this->arguments["amount"] ?: 1) * pow(10, $decimals));
+
+        // --
+        // CREATE MODE (--property & --amount)
+        // --
         if (empty($asmScript) && empty($hexScript)) {
             // create Hexadecimal Payload
-            dd($this->arguments);
+
+            $this->info("");
+            $this->info("Now creating OP_RETURN payload..");
+
             return ;
         }
+
+        // --
+        // PARSE MODE (--asm or --hex passed to be interpreted)
+        // --
 
         // validate ASM content (opcodes + hexadecimal allowed, nothing more)
         $parts = [];
