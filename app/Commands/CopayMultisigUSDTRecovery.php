@@ -81,8 +81,9 @@ class CopayMultisigUSDTRecovery
                             {--t3|input3= : Define a Input Transaction Hash #3 (From where to pay fees).}
                             {--i3|vindex3=0 : Define a Input Transaction Index #3.}
                             {--s3|path-sign3= : Define a BIP32 Derivation Path for the HD Key to use for signing Input #3.}
-                            {--B|bitcoin= : Define a Bitcoin Amount for the transaction in Satoshi (0.00000001 BTC = 1 Sat).}
-                            {--D|dust-amount= : Define the dust output amount in Satoshi (Default 5600 Sat - reference amount OMNI) (0.00000001 BTC = 1 Sat).}
+                            {--B|bitcoin= : Define a Bitcoin Amount for the transaction in Satoshi (1 Sat = 0.00000001 BTC).}
+                            {--f|fee= : Define a Bitcoin Fee Amount for the transaction in Satoshi (1 Sat = 0.00000001 BTC).}
+                            {--D|dust-amount= : Define the dust output amount in Satoshi (Default 5600 Sat - reference amount OMNI) (1 Sat = 0.00000001 BTC).}
                             {--C|currency=USDT : Define a custom currency for the Amount (Default USDT).}
                             {--c|colored-op= : Define a colored Operation (hexadecimal) to include in a OP_RETURN output.}
                             {--N|network=bitcoin : Define which Network must be used ("bitcoin" for Bitcoin Livenet).}
@@ -180,6 +181,7 @@ class CopayMultisigUSDTRecovery
             "destination" => null,
             "change" => null,
             "bitcoin" => null,
+            "fee" => null,
             "dust-amount" => null,
             "currency" => "USDT",
             "colored-op" => null,
@@ -446,20 +448,21 @@ class CopayMultisigUSDTRecovery
         $colorScript = $this->getColoredScript();
 
         // prepare transaction fee and amount
-        $bitcoin = (int) $this->arguments["bitcoin"];
-        $dustAmt = (int) $this->arguments["dust-amount"] ?: 5600; // reference output amount
+        $bitcoin  = (int) $this->arguments["bitcoin"];
+        $dustAmt  = (int) $this->arguments["dust-amount"] ?: 5600; // Omni reference output amount in December 2017
+        $minerFee = (int) $this->arguments["fee"] ?: 50000; // 0.00050000 BTC default fee
 
         // create new transaction output
         //$payToChange = ScriptFactory::scriptPubKey()->payToAddress($addressChange);
         //$payToColor  = ScriptFactory::scriptPubKey()->payToAddress($addressColor);
 
-        $txOut = new TransactionOutput($bitcoin - 50000, $addressChange->getScriptPubKey()); // leave 0.00050000 BTC for fee
+        $txOut = new TransactionOutput($bitcoin - $minerFee, $addressChange->getScriptPubKey()); // leave some BTC for fee with --fee
         $txOutCol = new TransactionOutput(0, $colorScript); // coloring operation (OP_RETURN xxx)
         $txOutDest = new TransactionOutput($dustAmt, $addressColor->getScriptPubKey()); // dust amount for omni destination
 
         // create outputs (order important)
         $transaction = $transaction->outputs([$txOutCol, $txOut, $txOutDest]) // order important
-                            //->payToAddress($bitcoin - 50000, $addressChange) // Change Output must be first + Leave 0.00050000 BTC for Fee
+                            //->payToAddress($bitcoin - $minerFee, $addressChange) // Change Output must be first + Leave 0.00050000 BTC for Fee
                             //->payToAddress($dustAmt, $addressColor) // Last non-sender output address is Destination of USDT.
                             ->get();
 
