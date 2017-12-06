@@ -35,7 +35,7 @@ use BitWasp\Bitcoin\Network\NetworkFactory;
 use App\Helpers\IntegerConvert;
 use RuntimeException;
 
-class AddressDerivation
+class MultisigHDWalletCreation
     extends Command
 {
     /**
