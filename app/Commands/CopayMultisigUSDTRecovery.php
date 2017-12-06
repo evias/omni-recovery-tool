@@ -47,6 +47,9 @@ use BitWasp\Bitcoin\Script\WitnessScript;
 use BitWasp\Bitcoin\Script\P2shScript;
 use BitWasp\Bitcoin\Script\Opcodes;
 use BitWasp\Bitcoin\Script\Script;
+use BitWasp\Bitcoin\Transaction\SignatureHash\SigHashInterface;
+use BitWasp\Bitcoin\Transaction\SignatureHash\SigHash;
+use BitWasp\Bitcoin\Script\Classifier\OutputClassifier;
 
 use App\Helpers\IntegerConvert;
 use RuntimeException;
@@ -71,15 +74,17 @@ class CopayMultisigUSDTRecovery
                             {--d2|change= : Define a *Change* destination Address (rest BTC).}
                             {--t1|input1= : Define a Input Transaction Hash #1 (From where to pay fees).}
                             {--i1|vindex1=0 : Define a Input Transaction Index #1.}
+                            {--s1|path-sign1= : Define a BIP32 Derivation Path for the HD Key to use for signing Input #1.}
                             {--t2|input2= : Define a Input Transaction Hash #2 (From where to pay fees).}
                             {--i2|vindex2=0 : Define a Input Transaction Index #2.}
+                            {--s2|path-sign2= : Define a BIP32 Derivation Path for the HD Key to use for signing Input #2.}
                             {--t3|input3= : Define a Input Transaction Hash #3 (From where to pay fees).}
                             {--i3|vindex3=0 : Define a Input Transaction Index #3.}
+                            {--s3|path-sign3= : Define a BIP32 Derivation Path for the HD Key to use for signing Input #3.}
                             {--B|bitcoin= : Define a Bitcoin Amount for the transaction in Satoshi (0.00000001 BTC = 1 Sat).}
                             {--D|dust-amount= : Define the dust output amount in Satoshi (Default 5600 Sat - reference amount OMNI) (0.00000001 BTC = 1 Sat).}
                             {--C|currency=USDT : Define a custom currency for the Amount (Default USDT).}
                             {--c|colored-op= : Define a colored Operation (hexadecimal) to include in a OP_RETURN output.}
-                            {--p|path=m/0 : Define the HD derivation path (BIP32).}
                             {--N|network=bitcoin : Define which Network must be used ("bitcoin" for Bitcoin Livenet).}
                             {--E|use-elligius : Define wheter to use Elligius Miner PushTx API (non-standard tx accepted).}';
 
@@ -109,30 +114,21 @@ class CopayMultisigUSDTRecovery
      *
      * @var array
      */
-    protected $publicKeys = [];
+    protected $publicKeysByPath = [];
 
     /**
-     * List of public key By Hash
-     *
-     * Those hashes 20-bytes: RIPEMD160(SHA256(hash))
+     * List of Cosigner HD Keys by Derivation Path
      *
      * @var array
      */
-    protected $pubKeyByHash = [];
+    protected $cosignerKeysByPath = [];
 
     /**
-     * List of Private Keys by their Public Key
+     * List BIP44 Keys by Public Keys
      *
      * @var array
      */
-    protected $privateByPub = [];
-
-    /**
-     * List of HD Keys
-     *
-     * @var array
-     */
-    protected $hdKeysByPub = [];
+    protected $bip44ByBip39 = [];
 
     /**
      * BIP32 Master Account (m/0)
@@ -189,11 +185,13 @@ class CopayMultisigUSDTRecovery
             "colored-op" => null,
             "input1" => null,
             "vindex1" => 0,
+            "path-sign1" => 0,
             "input2" => null,
             "vindex2" => 0,
+            "path-sign2" => 0,
             "input3" => null,
             "vindex3" => 0,
-            "path" => "m/0",
+            "path-sign3" => 0,
             "use-elligius" => false,
         ];
 
@@ -229,8 +227,7 @@ class CopayMultisigUSDTRecovery
 
             $bip39Generator = new Bip39SeedGenerator();
             $this->hdKeysByPub = [];
-            $paths = [];
-            foreach ($mnemonics as $ix => $mnemonic) {
+            foreach ($mnemonics as $ix => $mnemonic) :
 
                 // password or empty pass
                 $pass = $this->arguments["cosig" . ($ix+1) . "-password"] ?: "";
@@ -249,55 +246,77 @@ class CopayMultisigUSDTRecovery
                 }
                 else $bip32 = $this->masterHD;
 
-                // BIP32+BIP44: derive HD Key with derivation path provided through --path (or m/44'/0'/0')
-                $path  = $this->arguments["path"] ?: "m/44'/0'/0'";
-                $cosignerPath = $path/* . "/0/" . $ix*/;
+                // BIP44: derive HD Key with derivation path m/44'/0'/0'
+                $bip44 = $mnemo32->derivePath("m/44'/0'/0'");
+                $this->bip44ByBip39[$bip39->getHex()] = $bip44;
 
-                $child = $mnemo32->derivePath($cosignerPath); // cosigner index matters!
-                $public = $child->getPublicKey();
+                // derive input-signing keys
+                $paths = [
+                    0 => $this->arguments["path-sign1"] ?: "m/44'/0'/0'",
+                    1 => $this->arguments["path-sign2"] ?: null,
+                    2 => $this->arguments["path-sign3"] ?: null,
+                ];
 
-                // store HD Key (from which to build keypair)
-                $this->hdKeysByPub[$public->getHex()] = $child;
-                array_push($this->publicKeys, $public);
-                $paths[$cosignerPath] = $mnemonic;
-            }
+                foreach ($paths as $ix => $path) :
+                    if (empty($path))
+                        continue;
 
-//            dd($paths);
+                    $child = $mnemo32->derivePath($path);
+                    $public = $child->getPublicKey();
 
-            // Sort (by) public keys
-            //$this->publicKeys = Buffertools::sort($this->publicKeys);
-            //ksort($this->hdKeysByPub);
+                    if (empty($this->cosignerKeysByPath[$path]))
+                        $this->cosignerKeysByPath[$path] = [];
+
+                    if (empty($this->cosignerKeysByPath[$path]))
+                        $this->publicKeysByPath[$path] = [];
+
+                    $this->cosignerKeysByPath[$path][$public->getHex()] = $child;
+                    array_push($this->publicKeysByPath[$path], $public);
+                endforeach ;
+
+            endforeach ;
+
+            //$pubs = array_keys($this->cosignerKeysByPath[$paths[0]]);
+            //$this->publicKeysByPath[$paths[0]] = Buffertools::sort($this->publicKeysByPath[$paths[0]]);
+            //ksort($this->cosignerKeysByPath[$paths[0]]);
+
+            foreach ($this->publicKeysByPath as $path => &$publicKeys) :
+                // Sort (by) public keys
+                $publicKeys = Buffertools::sort($publicKeys);
+                ksort($this->cosignerKeysByPath[$path]);
+            endforeach ;
+
+            //dd(array_keys($this->cosignerKeysByPath[$paths[0]]), array_keys($this->cosignerKeysByPath[$paths[1]]));
 
             $this->info("");
             $this->info("Cosignatories Data Provided: ");
             $this->info("");
             $this->info("  Master Backup XPRV: " . $this->masterHD->toExtendedPrivateKey());
+            $this->info("  Master Backup XPUB: " . $this->masterHD->toExtendedPublicKey());
             $this->info("");
-            array_map(function($pub, $hd) {
-                
-                static $ix;
-                if (!$ix)
-                    $ix = 0;
 
-                $keyHash = $hd->getPublicKey()->getPubKeyHash()->getHex();
-                $address = $hd->getPublicKey()->getAddress()->getAddress();
-                $xpub    = $hd->toExtendedPublicKey($this->network);
-                $xprv    = $hd->toExtendedPrivateKey($this->network);
-                
-                $this->warn("  " . $ix . ") " . $pub);
-                $this->warn("    pubKeyHash: " . $keyHash);
-                $this->warn("    address: " . $address);
-                $this->warn("    XPUB: " . $xpub);
-                $this->warn("    XPRV: " . $xprv);
-                $this->info("");
+            foreach ($this->cosignerKeysByPath as $path => $cosignersByPub) :
+                $this->warn("  1) " . $path);
+                array_map(function($pub, $hd) {
+                    static $ix;
+                    if (!$ix)
+                        $ix = 0;
 
-                $ix++;
+                    $keyHash = $hd->getPublicKey()->getPubKeyHash()->getHex();
+                    $address = $hd->getPublicKey()->getAddress()->getAddress();
 
-            }, array_keys($this->hdKeysByPub), array_values($this->hdKeysByPub));
+                    $this->warn("      " . $ix . ") " . $pub);
+                    $this->warn("          Address: " . $address);
+                    $this->info("");
+
+                    $ix++;
+
+                }, array_keys($cosignersByPub), array_values($cosignersByPub));
+            endforeach ;
             //}, $this->publicKeys);
         }
 
-        return $this->hdKeysByPub;
+        return $this->cosignerKeysByPath;
     }
 
     /**
@@ -358,19 +377,70 @@ class CopayMultisigUSDTRecovery
         $addressColor  = AddressFactory::fromString($destination, $network);
         $addressChange = AddressFactory::fromString($changeAddress, $network);
 
+        // this will automatically derive paths to find the right signature
+        $this->setUpKeys($this->arguments["mnemonics"], $network);
+
+        // --
+        // PREPARE MULTISIG
+        // --
+
+        // create Multisig redeem script
+        $m1_path = $this->arguments["path-sign1"] ?: "m/0";
+        $m2_path = $this->arguments["path-sign2"] ?: "m/1";
+        $m3_path = $this->arguments["path-sign3"] ?: "m/2";
+
+        $m1_Address = new MultisigHD($minCosignatories, $m1_path, array_values($this->cosignerKeysByPath[$m1_path]), new HierarchicalKeySequence(), false);
+        $m1_P2SHScript = $m1_Address->getRedeemScript();
+        $m1_outputScript = $m1_P2SHScript->getOutputScript();
+        $m2_outputScript = null; // default only sign 1 input
+        $m3_outputScript = null; // default only sign 1 input
+
+        if ($this->arguments["path-sign2"]) {
+            $m2_path = $this->arguments["path-sign2"];
+            $m2_Address = new MultisigHD($minCosignatories, $m2_path, array_values($this->cosignerKeysByPath[$m2_path]), new HierarchicalKeySequence(), false);
+            //dd($m2_path, $m2_Address->getAddress()->getAddress());
+            $m2_P2SHScript = $m2_Address->getRedeemScript();
+            $m2_outputScript = $m2_P2SHScript->getOutputScript();
+        }
+
+        if ($this->arguments["path-sign3"]) {
+            $m3_path = $this->arguments["path-sign3"];
+            $m3_Address = new MultisigHD($minCosignatories, $m3_path, array_values($this->cosignerKeysByPath[$m3_path]), new HierarchicalKeySequence(), false);
+            $m3_P2SHScript = $m3_Address->getRedeemScript();
+            $m3_outputScript = $m3_P2SHScript->getOutputScript();
+        }
+
+        // --
+        // PREPARE INPUTS
+        // --
+
         // Create Outpoint from --transaction hash.
         $firstInput  = new Outpoint(Buffer::hex($this->arguments["input1"]), $this->arguments["vindex1"]);
         $secondInput = $this->arguments["input2"] ? new Outpoint(Buffer::hex($this->arguments["input2"]), $this->arguments["vindex2"]) : null;
         $thirdInput  = $this->arguments["input3"] ? new Outpoint(Buffer::hex($this->arguments["input3"]), $this->arguments["vindex3"]) : null;
 
-        // this will automatically derive paths to find the right signature
-        $this->setUpKeys($this->arguments["mnemonics"], $network);
+        // Now construct transaction with built outpoints and outputs.
+        $transaction = TransactionFactory::build();
+        $txInputs    = [$firstInput];
 
-        // create Multisig redeem script
-        $multisigAddress = new MultisigHD($minCosignatories, $this->arguments["path"], array_values($this->hdKeysByPub), new HierarchicalKeySequence(), false);
-        $multisigScript = $multisigAddress->getRedeemScript();
-        $p2shScript     = $multisigScript;
-        $outputScript   = $multisigScript->getOutputScript();
+        // spend --input1
+        $transaction = $transaction->spendOutpoint($firstInput, $m1_outputScript);
+
+        if ($secondInput) {
+            // spend --input2
+            array_push($txInputs, $secondInput);
+            $transaction = $transaction->spendOutpoint($secondInput, $m2_outputScript);
+        }
+
+        if ($thirdInput) {
+            // spend --input3
+            array_push($txInputs, $secondInput);
+            $transaction = $transaction->spendOutpoint($thirdInput, $m3_outputScript);
+        }
+
+        // --
+        // PREPARE OUTPUTS
+        // --
 
         // Define coloring operation
         $colorScript = $this->getColoredScript();
@@ -380,36 +450,17 @@ class CopayMultisigUSDTRecovery
         $dustAmt = (int) $this->arguments["dust-amount"] ?: 5600; // reference output amount
 
         // create new transaction output
-        $txOut = new TransactionOutput($bitcoin - 50000, $outputScript); // leave 0.00050000 BTC for fee
-        $txOutCol = new TransactionOutput($dustAmt, $outputScript); // dust amount for omni destination
+        //$payToChange = ScriptFactory::scriptPubKey()->payToAddress($addressChange);
+        //$payToColor  = ScriptFactory::scriptPubKey()->payToAddress($addressColor);
 
-        // Now construct transaction with built outpoints and outputs.
-        $transaction = TransactionFactory::build();
-        $txInputs    = [$firstInput];
-        $txOutputs   = [
-            0 => ['inputs' => [0], 'output' => $txOut],
-            1 => ['inputs' => [0], 'output' => $txOutCol]
-        ];
-
-        // spend --input1
-        $transaction = $transaction->spendOutpoint($firstInput, $outputScript);
-
-        if ($secondInput) {
-            // spend --input2
-            array_push($txInputs, $secondInput);
-            $transaction = $transaction->spendOutpoint($secondInput, $outputScript);
-        }
-
-        if ($thirdInput) {
-            // spend --input3
-            array_push($txInputs, $secondInput);
-            $transaction = $transaction->spendOutpoint($thirdInput, $outputScript);
-        }
+        $txOut = new TransactionOutput($bitcoin - 50000, $addressChange->getScriptPubKey()); // leave 0.00050000 BTC for fee
+        $txOutCol = new TransactionOutput(0, $colorScript); // coloring operation (OP_RETURN xxx)
+        $txOutDest = new TransactionOutput($dustAmt, $addressColor->getScriptPubKey()); // dust amount for omni destination
 
         // create outputs (order important)
-        $transaction = $transaction->output(0, $colorScript)
-                            ->payToAddress($bitcoin - 50000, $addressChange) // Change Output must be first + Leave 0.00050000 BTC for Fee
-                            ->payToAddress($dustAmt, $addressColor) // Last non-sender output address is Destination of USDT.
+        $transaction = $transaction->outputs([$txOutCol, $txOut, $txOutDest]) // order important
+                            //->payToAddress($bitcoin - 50000, $addressChange) // Change Output must be first + Leave 0.00050000 BTC for Fee
+                            //->payToAddress($dustAmt, $addressColor) // Last non-sender output address is Destination of USDT.
                             ->get();
 
         $this->info("  Before Signing: " . $transaction->getBuffer()->getSize() . " Bytes");
@@ -417,8 +468,16 @@ class CopayMultisigUSDTRecovery
         $this->warn("    " . $transaction->getBuffer()->getHex());
         $this->info("");
 
+        // --
+        // SIGN TRANSACTION
+        // --
+
         // Sign transaction and display details
-        $signed = $this->signTransaction($transaction, $p2shScript, $txOutputs);
+        $signed = $this->signTransaction($transaction, [
+            $m1_path => ["input" => 0, "script" => $m1_P2SHScript],
+            $m2_path => ["input" => 1, "script" => isset($m2_P2SHScript) ? $m2_P2SHScript : null],
+            $m3_path => ["input" => 2, "script" => isset($m3_P2SHScript) ? $m3_P2SHScript : null]
+        ]);
 
         // get human-readable inputs and outputs
         list($inputs,
@@ -513,7 +572,7 @@ class CopayMultisigUSDTRecovery
      * @param   array                                       $outputs    Array of TransactionOutput instances
      * @return  \BitWasp\Bitcoin\Transaction\Transaction
      */
-    protected function signTransaction(Transaction $transaction, Script $script, array $outputs): Transaction
+    protected function signTransaction(Transaction $transaction, array $scripts): Transaction
     {
         $this->info("Now applying Transaction Signatures..");
 
@@ -522,64 +581,62 @@ class CopayMultisigUSDTRecovery
 
         // Multisig - sign transaction with `min` cosignatories
         $signer = (new Signer($transaction, $ec));
-        $signData = (new SignData())
-                        ->p2sh($script);
+        $inputs = $transaction->getInputs();
 
-        $inputs = [];
-        $hashes = array_keys($this->pubKeyByHash);
-        for ($ix = 0; $ix < $minCosignatories; $ix++) :
+        $outputs = [];
+        foreach ($inputs as $idx => $input) :
+            $inScript = $input->getScript()->getBuffer()->getHex();
+            $output = new TransactionOutput($idx, ScriptFactory::fromHex($inScript));
 
-            // Iterate through SORTED PUBLIC KEYS because this defines
-            // the signature order for multisignature transactions!
-            $pub = $this->publicKeys[$ix];
-            $hdk = $this->hdKeysByPub[$pub->getHex()];
+            array_push($outputs, $output);
+        endforeach;
 
-            if (!$hdk->isPrivate()) {
-                $this->error("Skipped public key: " . $hdk->getPublicKey()->getHex());
-                continue;
-            }
+        // --
+        // APPLY SIGNATURES
+        // --
 
-            // load private key WIF from HD Key
-            $cosignerPrivate = $hdk->getPrivateKey();
+        // ---
+        // DEBUG BITCOIN SCRIPT SOLUTION
+        // ---
 
-            foreach ($outputs as $o => $outputSpec): 
+        //$classifier = new OutputClassifier();
+        //$sigVersion = SigHash::V0;
+        //$sigChunks = [];
+        //$solution = $classifier->decode($outputs[0]->getScript());
 
-                $output = $outputSpec["output"];
-                $currentIns = $outputSpec["inputs"];
+        // ASM representation of `$script` bitcoin script
+        //$myASM = $script->getScriptParser()->getHumanReadable();
 
-                for ($i = 0, $cnt = count($currentIns); $i < $cnt; $i++) :
-                    // sign each input needed for output
+        // ASM representation of the created input
+        //$inASM = $outputs[0]->getScript()->getScriptParser()->getHumanReadable();
 
-                    try {
-                        $input = $signer->input($currentIns[$i], $output, $signData);
-                        $input->sign($cosignerPrivate);
+        // ---
+        // END DEBUG BITCOIN SCRIPT SOLUTION
+        // ---
 
-                        array_push($inputs, $input);
-                    }
-                    catch (RuntimeException $e) {
-                        $this->error($e->getMessage());
-                        dd($outputs[$o]);
-                    }
-                endfor;
-            endforeach;
-        endfor;
+        foreach ($scripts as $path => $spec) :
 
-        // process signatures and mutate transaction
+            if ($spec["script"] === null)
+                continue; // no script provided for signing
+
+            $vin = $spec["input"];
+            $script = $spec["script"];
+            $output = $outputs[$vin];
+
+            $signData = (new SignData())->p2sh($script);
+
+            for ($cosig = 0; $cosig < $minCosignatories; $cosig++) :
+
+                $pub = $this->publicKeysByPath[$path][$cosig];
+                $hdk = $this->cosignerKeysByPath[$path][$pub->getHex()];
+                $priv = $hdk->getPrivateKey();
+
+                $signer->sign($vin, $priv, $output, $signData, SigHash::ALL);
+            endfor;
+
+        endforeach ;
+
         $signed = $signer->get();
-        $overall = true;
-        foreach ($inputs as $ix => $input) {
-            $result = $input->verify();
-            $overall &= $result;
-
-            if ($result)
-                $this->info("Validation of Input #" . ($ix + 1) . ": OK");
-            else
-                $this->warn("Error for Validation of Input #" . ($ix + 1));
-        }
-
-        if ($overall)
-            $this->info("Transaction Multi-Signed successfully!");
-
         return $signed;
     }
 
