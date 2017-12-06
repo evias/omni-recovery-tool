@@ -140,14 +140,11 @@ class HyperDeterministicWallets
             foreach ($this->extendedKeys as $xpub)
                 array_push($xpubs, HierarchicalKeyFactory::fromExtended($xpub, $network));
 
-            $seq = new HierarchicalKeySequence();
-            $hdk = new MultisigHD($min, 'm', $xpubs, $seq, true);
-
-            // Path Derivation (Multisig)
-            $child = $hdk->derivePath($path);
+            $seq  = new HierarchicalKeySequence();
+            $hdk  = new MultisigHD($min, $path, $xpubs, $seq, true);
 
             // Read Data
-            $address = $child->getAddress()->getAddress();
+            $address = $hdk->getAddress()->getAddress();
             $script  = $hdk->getScriptPubKey();
             $redeem  = $hdk->getRedeemScript();
         }
