@@ -74,7 +74,9 @@ $  php application omni:copay-recovery --input1="9141346500a45fb588e2ee2908583d9
                                        --destination "1Ajqkh2foqMGLRAe9YkS7mwMgsAEiAx3aM" \
                                        --change "143f5QPkc5mJurEr2kGPPoecJqkhvaQ2u2" \
                                        --min 2 \
-                                       --bitcoin 75000
+                                       --bitcoin 75000 \
+                                       --fee 40000 \
+                                       --colored-op="6f6d6e69000000000000001f000000002faf0800"
 ```
 
 ## How to find the right derivation path
@@ -84,7 +86,22 @@ will display the Wallet Address as well as the Redeem Script and Output Script i
 
 Running this command, you can test a lot of derivation paths **as to find the exact derivation path of the address you need to recover**.
 
-The command can be run with the following:
+Example derivation paths include:
+
+- CoPay Multisig First Address: **m/44'/0'/0'/0/0**
+- CoPay Multisig 19th Address: **m/44'/0'/0'/0/18**
+- CoPay Multisig First *Change* Address: **m/44'/0'/0'/1/0**
+- CoPay Cosigners Base Derivation Path: **m/44'/0'/0'**.
+  - XPUBs of the cosigners are derived with the base derivation path.
+- Multibit HD First Address: **m/0'/0/0**.
+- BIP44 First Address: **m/44'/0'/0'/0/0**.
+- BIP49 First Address: **m/49'/0'/0'/0/0**.
+- BIP141 (Segregated Witness) First Address:  **m/0/0**
+- Bitcoin Core BIP32 First Address: **m/0'/0'/0'**
+  - Always Hardened!
+- Blockchain.info BIP32 First Address: **m/44'/0'/0'/0**
+
+The command to create multisig wallets and display their informations such as Address, Redeem Script and Output Script, can be run with the following:
 
 ```bash
 # Get Multisig Address at derivation m/44'/0'/0'/0/0 (first CoPay Wallet address) with 2 of 3 configuration
