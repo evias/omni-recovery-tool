@@ -47,11 +47,14 @@ use BitWasp\Bitcoin\Script\WitnessScript;
 use BitWasp\Bitcoin\Script\P2shScript;
 use BitWasp\Bitcoin\Script\Opcodes;
 use BitWasp\Bitcoin\Script\Script;
+use BitWasp\Bitcoin\Transaction\SignatureHash\SigHashInterface;
+use BitWasp\Bitcoin\Transaction\SignatureHash\SigHash;
+use BitWasp\Bitcoin\Script\Classifier\OutputClassifier;
 
 use App\Helpers\IntegerConvert;
 use RuntimeException;
 
-class SignRawTransaction
+class ChildPaysForParent
     extends Command
 {
     /**
@@ -59,16 +62,15 @@ class SignRawTransaction
      *
      * @var string
      */
-    protected $signature = 'wallet:sign-tx
-                            {--m|min=1 : Define number of Minimum Cosignatories for the Multisig P2SH.}
-                            {--c1|cosig1= : Define a Mnemonic passphrase for cosignator 1.}
-                            {--c1p|cosig1-password= : Define a Password for cosignator 1.}
-                            {--c2|cosig2= : Define a Mnemonic passphrase for cosignator 2.}
-                            {--c2p|cosig2-password= : Define a Password for cosignator 2.}
-                            {--c3|cosig3= : Define a Mnemonic passphrase for cosignator 3.}
-                            {--c3p|cosig3-password= : Define a Password for cosignator 3.}
-                            {--p|path=m/0 : Define the HD derivation path (BIP32).}
-                            {--R|raw= : Define the raw transaction content (Obligatory - hexadecimal payload).}
+    protected $signature = 'wallet:child-pays-for-parent
+                            {--m|mnemonic= : Define a Mnemonic for the Wallet to use.}
+                            {--p|password= : Define a Password for the Wallet to use (Optional).}
+                            {--d|destination= : Define a destination Address for the Rest Bitcoin.}
+                            {--I|parent= : Define the Parent transaction ID used for Paying both fees (Child and Parent).}
+                            {--i|vindex=0 : Define a Output Index in the Parent transaction ID (linked to --parent transaction ID).}
+                            {--p|path= : Define a BIP32 Derivation Path for the HD Key to use for signing the Input.}
+                            {--B|bitcoin= : Define a Bitcoin Amount for the transaction in Satoshi (1 Sat = 0.00000001 BTC).}
+                            {--f|fee= : Define a TOTAL Bitcoin Fee Amount for the transactions in Satoshi, both Child and Parent should be paid with this Fee. (1 Sat = 0.00000001 BTC).}
                             {--N|network=bitcoin : Define which Network must be used ("bitcoin" for Bitcoin Livenet).}';
 
     /**
@@ -76,7 +78,7 @@ class SignRawTransaction
      *
      * @var string
      */
-    protected $description = 'Utility for signing raw transactions with multisig accounts.';
+    protected $description = 'Utility for creating Child Pays For Parent transactions.';
 
     /**
      * The current blockchain network instance
@@ -97,30 +99,21 @@ class SignRawTransaction
      *
      * @var array
      */
-    protected $publicKeys = [];
+    protected $publicKeysByPath = [];
 
     /**
-     * List of public key By Hash
-     *
-     * Those hashes 20-bytes: RIPEMD160(SHA256(hash))
+     * List of Cosigner HD Keys by Derivation Path
      *
      * @var array
      */
-    protected $pubKeyByHash = [];
+    protected $cosignerKeysByPath = [];
 
     /**
-     * List of Private Keys by their Public Key
+     * List BIP44 Keys by Public Keys
      *
      * @var array
      */
-    protected $privateByPub = [];
-
-    /**
-     * List of HD Keys
-     *
-     * @var array
-     */
-    protected $hdKeysByPub = [];
+    protected $bip44ByBip39 = [];
 
     /**
      * BIP32 Master Account (m/0)
@@ -139,27 +132,18 @@ class SignRawTransaction
         $our_opts = [
             'min' => null,
             'network' => "bitcoin",
-            "cosig1" => null,
-            "cosig1-password" => null,
-            "cosig2" => null,
-            "cosig2-password" => null,
-            "cosig3" => null,
-            "cosig3-password" => null,
-            "raw" => null,
-            "path" => "m/0",
-            "use-elligius" => false,
+            "mnemonic" => null,
+            "destination" => null,
+            "bitcoin" => null,
+            "fee" => null,
+            "parent" => null,
+            "vindex" => 0,
+            "path" => null,
         ];
 
         // parse command line arguments.
         $options  = array_intersect_key($this->option(), $our_opts);
-
-        // Parse Mnemonics (up to 3)
-        $mnemonics = [];
-        if ($options["cosig1"]) array_push($mnemonics, $options["cosig1"]);
-        if ($options["cosig2"]) array_push($mnemonics, $options["cosig2"]);
-        if ($options["cosig3"]) array_push($mnemonics, $options["cosig3"]);
-
-        $options["mnemonics"] = $mnemonics;
+        $options["mnemonics"] = [$options["mnemonic"]];
 
         // store arguments
         $this->arguments = $options;
@@ -181,17 +165,10 @@ class SignRawTransaction
 
             $bip39Generator = new Bip39SeedGenerator();
             $this->hdKeysByPub = [];
-            $paths = [];
-
-            // MUST HAVE:
-            // 02109c754588a5e6de512a68b0e82fa8ed6520f5fd57f6b41315e3d3c2b8f92ac2
-            // 0318e0167d697e9366f17c2e83ac21c7e66ecc9427884d083887c8d3b6aa3857d8
-            // 0350bc7cb1f4632c42ad092b1b825beea81ad4a663fa1c365c95d09ff44a11f303
-
-            foreach ($mnemonics as $ix => $mnemonic) {
+            foreach ($mnemonics as $ix => $mnemonic) :
 
                 // password or empty pass
-                $pass = $this->arguments["cosig" . ($ix+1) . "-password"] ?: "";
+                $pass = $this->arguments["password"] ?: "";
 
                 // BIP39 seed generation
                 $bip39 = $bip39Generator->getSeed($mnemonic, $pass);
@@ -207,61 +184,65 @@ class SignRawTransaction
                 }
                 else $bip32 = $this->masterHD;
 
-                // BIP32+BIP44: derive HD Key with derivation path provided through --path (or m/44'/0'/0')
-                $path  = $this->arguments["path"] ?: "m/44'/0'/0'";
-                $cosignerPath = $path;/* . ($ix+1);*/
+                // BIP44: derive HD Key with derivation path m/44'/0'/0'
+                $bip44 = $mnemo32->derivePath("m/44'/0'/0'");
+                $this->bip44ByBip39[$bip39->getHex()] = $bip44;
 
-                $child = $mnemo32->derivePath($cosignerPath); // cosigner index matters!
+                $path  = $this->arguments["path"] ?: "m/44'/0'/0'/0/0"; // Default is BIP44+BIP32 Derivation Path
+                $child = $mnemo32->derivePath($path);
                 $public = $child->getPublicKey();
 
-                // store HD Key (from which to build keypair)
-                $this->hdKeysByPub[$public->getHex()] = $child;
-                array_push($this->publicKeys, $public);
-                $paths[$cosignerPath] = $mnemonic;
-            }
+                if (empty($this->cosignerKeysByPath[$path]))
+                    $this->cosignerKeysByPath[$path] = [];
 
-//            dd($paths);
+                if (empty($this->publicKeysByPath[$path]))
+                    $this->publicKeysByPath[$path] = [];
 
-            // Sort (by) public keys
-            //$this->publicKeys = Buffertools::sort($this->publicKeys);
-            //ksort($this->hdKeysByPub);
+                $this->cosignerKeysByPath[$path][$public->getHex()] = $child;
+                array_push($this->publicKeysByPath[$path], $public);
+
+            endforeach ;
+
+            foreach ($this->publicKeysByPath as $path => &$publicKeys) :
+                // Sort (by) public keys
+                $publicKeys = Buffertools::sort($publicKeys);
+                ksort($this->cosignerKeysByPath[$path]);
+            endforeach ;
 
             $this->info("");
             $this->info("Cosignatories Data Provided: ");
             $this->info("");
-            $this->info("  Master Backup XPRV:    " . $this->masterHD->toExtendedPrivateKey());
-            $this->info("  Using Derivation Path: " . $this->arguments["path"]);
+            $this->info("  Master Backup XPRV: " . $this->masterHD->toExtendedPrivateKey());
+            $this->info("  Master Backup XPUB: " . $this->masterHD->toExtendedPublicKey());
             $this->info("");
-            array_map(function($pub, $hd) {
-                
-                static $ix;
-                if (!$ix)
-                    $ix = 0;
 
-                $keyHash = $hd->getPublicKey()->getPubKeyHash()->getHex();
-                $address = $hd->getPublicKey()->getAddress()->getAddress();
-                $xpub    = $hd->toExtendedPublicKey($this->network);
-                $xprv    = $hd->toExtendedPrivateKey($this->network);
-                
-                $this->warn("  " . $ix . ") " . $pub);
-                $this->warn("    pubKeyHash: " . $keyHash);
-                $this->warn("    address: " . $address);
-                $this->warn("    XPUB: " . $xpub);
-                $this->warn("    XPRV: " . $xprv);
-                $this->info("");
+            foreach ($this->cosignerKeysByPath as $path => $cosignersByPub) :
+                $this->warn("  1) " . $path);
+                array_map(function($pub, $hd) {
+                    static $ix;
+                    if (!$ix)
+                        $ix = 0;
 
-                $ix++;
+                    $keyHash = $hd->getPublicKey()->getPubKeyHash()->getHex();
+                    $address = $hd->getPublicKey()->getAddress()->getAddress();
 
-            }, array_keys($this->hdKeysByPub), array_values($this->hdKeysByPub));
-            //}, $this->publicKeys);
+                    $this->warn("      " . $ix . ") " . $pub);
+                    $this->warn("          Address: " . $address);
+                    $this->info("");
+
+                    $ix++;
+
+                }, array_keys($cosignersByPub), array_values($cosignersByPub));
+            endforeach ;
         }
 
-        return $this->hdKeysByPub;
+        return $this->cosignerKeysByPath;
     }
 
     /**
      * Execute the console command.
      *
+     * @see https://bitcointalk.org/index.php?topic=2500531.new#new
      * @return mixed
      */
     public function handle(): void
@@ -280,41 +261,83 @@ class SignRawTransaction
         }
 
         // read parameters..
-        $minCosignatories = (int) $this->arguments["min"] ?: 1;
+        $destination   = $this->arguments["destination"];
 
         // interpret / validate mandatory parameters
-        if (empty($this->arguments["mnemonics"])) {
-            $this->error("Please specify at least one (max. 3) cosignator mnemonic passphrase with --cosig1, --cosig2 and --cosig3.");
+        if (empty($this->arguments["mnemonic"])) {
+            $this->error("Please specify a mnemonic with --mnemonic.");
+            return ;
+        }
+
+        if (empty($this->arguments["parent"])) {
+            $this->error("Please specify a Parent transaction id which will be used as Input and will be Spent (using --parent).");
+            return ;
+        }
+
+        if (empty($destination)) {
+            $this->error("Please specify a destination Address with --destination.");
             return ;
         }
 
         $this->info("");
         $this->info("Now preparing transaction..");
 
+        // address for `destination` (--destination)
+        $addressChild = AddressFactory::fromString($destination, $network);
+
         // this will automatically derive paths to find the right signature
         $this->setUpKeys($this->arguments["mnemonics"], $network);
 
-        // create Multisig redeem script
-        $multisigAddress = new MultisigHD($minCosignatories, $this->arguments["path"], array_values($this->hdKeysByPub), new HierarchicalKeySequence(), false);
-        $multisigScript = $multisigAddress->getRedeemScript();
-        $p2shScript     = $multisigScript;
-        $outputScript   = $multisigScript->getOutputScript();
+        // --
+        // PREPARE INPUTS
+        // --
 
-        // bundle it together..
-        $transaction = TransactionFactory::fromHex($this->arguments["raw"]);
+        // Create Outpoint from --transaction hash.
+        $parentInput  = new Outpoint(Buffer::hex($this->arguments["parent"]), $this->arguments["vindex"]);
+        $parentScript = ScriptFactory::scriptPubKey()->p2pkh($addressChild->getPubKeyHash());
+
+        // Now construct transaction with built outpoints and outputs.
+        $transaction = TransactionFactory::build();
+        $txInputs    = [$firstInput];
+
+        // spend --input1
+        $transaction = $transaction->spendOutpoint($firstInput);
+
+        // --
+        // PREPARE OUTPUTS
+        // --
+
+        // prepare transaction fee and amount
+        $bitcoin  = (int) $this->arguments["bitcoin"];
+        $minerFee = (int) $this->arguments["fee"] ?: 150000; // 0.00150000 BTC default fee (must pay for 2 tx!)
+
+        // create new transaction output
+        $txOut = new TransactionOutput($bitcoin - $minerFee, $addressChild->getScriptPubKey()); // leave some BTC for fee with --fee
+
+        // create outputs (order important)
+        $transaction = $transaction->outputs([$txOut])->get();
+
+        $this->info("  Before Signing: " . $transaction->getBuffer()->getSize() . " Bytes");
+        $this->info("");
+        $this->warn("    " . $transaction->getBuffer()->getHex());
+        $this->info("");
+
+        // --
+        // SIGN TRANSACTION
+        // --
+
+        // Sign transaction and display details
+        $signed = $this->signTransaction($transaction, [$path => $parentScript]);
 
         // get human-readable inputs and outputs
         list($inputs,
-             $outputs) = $this->formatTransactionContent($transaction);
+            $outputs) = $this->formatTransactionContent($transaction);
 
         $txData = [
             "version" => $transaction->getVersion(),
             "inputs"  => $inputs,
             "outputs" => $outputs
         ];
-
-        // Sign transaction and display details
-        $signed = $this->signTransaction($transaction, $p2shScript, $transaction->getOutputs());
 
         // print details about transaction.
         $this->info("");
@@ -379,73 +402,69 @@ class SignRawTransaction
      * @param   array                                       $outputs    Array of TransactionOutput instances
      * @return  \BitWasp\Bitcoin\Transaction\Transaction
      */
-    protected function signTransaction(Transaction $transaction, Script $script, array $outputs): Transaction
+    protected function signTransaction(Transaction $transaction, array $scripts): Transaction
     {
         $this->info("Now applying Transaction Signatures..");
 
         $minCosignatories = $this->arguments["min"] ?: 1;
         $ec = \BitWasp\Bitcoin\Bitcoin::getEcAdapter();
 
-        // Multisig - sign transaction with `min` cosignatories
+        // read transaction inputs and create signer
         $signer = (new Signer($transaction, $ec));
-        $signData = (new SignData())->p2sh($script);
+        $inputs = $transaction->getInputs();
 
-        $inputs = [];
-        $hashes = array_keys($this->pubKeyByHash);
-        for ($ix = 0; $ix < $minCosignatories; $ix++) :
-            // Iterate through SORTED PUBLIC KEYS because this defines
-            // the signature order for multisignature transactions!
-            $pub  = $this->publicKeys[$ix];
+        $outputs = [];
+        foreach ($inputs as $idx => $input) :
+            $inScript = $input->getScript()->getBuffer()->getHex();
+            $output = new TransactionOutput($idx, ScriptFactory::fromHex($inScript));
 
-            //$priv = $this->privateByPub[$pub->getPubKeyHash()->getHex()];
-            $hd = $this->hdKeysByPub[$pub->getHex()];
+            array_push($outputs, $output);
+        endforeach;
 
-            if (!$hd->isPrivate()) {
-                $this->error("Skipped public key: " . $hd->getPublicKey()->getHex());
-                continue;
-            }
+        // --
+        // APPLY SIGNATURES
+        // --
 
-            // load private key WIF from HD Key
-            $priv = $hd->getPrivateKey();
+        // ---
+        // DEBUG BITCOIN SCRIPT SOLUTION
+        // ---
 
-            for ($o = 0, $m = count($outputs); $o < $m; $o++) :
-                // sign with current cosigner
+        //$classifier = new OutputClassifier();
+        //$sigVersion = SigHash::V0;
+        //$sigChunks = [];
+        //$solution = $classifier->decode($outputs[0]->getScript());
 
-                try {
-                    $output = $outputs[$o];
-                    $asm = $output->getScript()->getScriptParser()->getHumanReadable();
+        // ASM representation of `$script` bitcoin script
+        //$myASM = $script->getScriptParser()->getHumanReadable();
 
-                    if ((bool) preg_match("/^OP_RETURN.*/", $asm))
-                        continue; // do not sign OP_RETURN dust
+        // ASM representation of the created input
+        //$inASM = $outputs[0]->getScript()->getScriptParser()->getHumanReadable();
 
-                    $input = $signer->input(0, $output, $signData);
-                    $input->sign($priv);
-                }
-                catch (RuntimeException $e) {
-                    $this->error($e->getMessage());
-                    dd($outputs[$o]);
-                }
+        // ---
+        // END DEBUG BITCOIN SCRIPT SOLUTION
+        // ---
 
-                array_push($inputs, $input);
-            endfor;
-        endfor;
+        foreach ($scripts as $path => $spec) :
 
-        // process signatures and mutate transaction
+            if ($spec["script"] === null)
+                continue; // no script provided for signing
+
+            $vin = $spec["input"];
+            $script = $spec["script"];
+            $output = $outputs[$vin];
+
+            $signData = (new SignData())->p2sh($script);
+
+            $pub = $this->publicKeysByPath[$path][0];
+            $hdk = $this->cosignerKeysByPath[$path][$pub->getHex()];
+            $priv = $hdk->getPrivateKey();
+
+            // sign transaction input
+            $signer->sign($vin, $priv, $output, $signData, SigHash::ALL);
+
+        endforeach ;
+
         $signed = $signer->get();
-        $overall = true;
-        foreach ($inputs as $ix => $input) {
-            $result = $input->verify();
-            $overall &= $result;
-
-            if ($result)
-                $this->info("Validation of Input #" . ($ix + 1) . ": OK");
-            else
-                $this->warn("Error for Validation of Input #" . ($ix + 1));
-        }
-
-        if ($overall)
-            $this->info("Transaction Multi-Signed successfully!");
-
         return $signed;
     }
 

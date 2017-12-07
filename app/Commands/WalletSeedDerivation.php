@@ -161,10 +161,10 @@ class WalletSeedDerivation
         return ;
     }
 
-    protected function deriveAndPrint(HierarchicalKey $parent, $path, $index = 0, $network = null): mixed
+    protected function deriveAndPrint(HierarchicalKey $parent, $path, $index = 0, $network = null): void
     {
         $key = $parent->deriveChild($index);
-        return $this->printKeyData($key, $path, $network, function($msg) { $this->info($msg); });
+        $this->printKeyData($key, $path, $network, function($msg) { $this->info($msg); });
     }
 
     protected function printKeyData(HierarchicalKey $key, $path, $network, $logClosure): void
