@@ -68,7 +68,7 @@ class ChildPaysForParent
                             {--d|destination= : Define a destination Address for the Rest Bitcoin.}
                             {--I|parent= : Define the Parent transaction ID used for Paying both fees (Child and Parent).}
                             {--i|vindex=0 : Define a Output Index in the Parent transaction ID (linked to --parent transaction ID).}
-                            {--p|path= : Define a BIP32 Derivation Path for the HD Key to use for signing the Input.}
+                            {--P|path= : Define a BIP32 Derivation Path for the HD Key to use for signing the Input.}
                             {--B|bitcoin= : Define a Bitcoin Amount for the transaction in Satoshi (1 Sat = 0.00000001 BTC).}
                             {--f|fee= : Define a TOTAL Bitcoin Fee Amount for the transactions in Satoshi, both Child and Parent should be paid with this Fee. (1 Sat = 0.00000001 BTC).}
                             {--N|network=bitcoin : Define which Network must be used ("bitcoin" for Bitcoin Livenet).}';
