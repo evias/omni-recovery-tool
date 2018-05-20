@@ -1,4 +1,4 @@
-# evias/blockchain-cli 
+# evias/omni-recovery-tool 
 
 [![Build Status](https://travis-ci.org/evias/blockchain-cli.svg)](https://travis-ci.org/evias/blockchain-cli)
 [![License](https://poser.pugx.org/evias/blockchain-cli/license.svg)](https://packagist.org/packages/evias/blockchain-cli)
